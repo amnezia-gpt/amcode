@@ -58,6 +58,35 @@ pub enum AuthCredentialsStoreMode {
     Ephemeral,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AuthConfigToml {
+    /// OIDC issuer used for interactive browser login.
+    pub issuer: Option<String>,
+    /// Public OAuth/OIDC client identifier.
+    pub client_id: Option<String>,
+    /// Scopes requested during browser login.
+    pub scopes: Option<Vec<String>>,
+    /// Token type requested when exchanging OIDC login credentials for a router API key.
+    pub requested_token_type: Option<String>,
+    /// Resource audience requested when exchanging OIDC login credentials for a router API key.
+    pub router_audience: Option<String>,
+    /// Optional explicit endpoint overrides. When unset, endpoints are derived from the issuer or
+    /// discovered from OIDC metadata by the auth layer.
+    pub endpoints: Option<AuthEndpointConfigToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct AuthEndpointConfigToml {
+    /// Explicit authorization endpoint override.
+    pub authorization: Option<String>,
+    /// Explicit token endpoint override.
+    pub token: Option<String>,
+    /// Explicit revocation endpoint override.
+    pub revocation: Option<String>,
+}
+
 /// Determine where Codex should store and read MCP credentials.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]

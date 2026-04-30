@@ -157,6 +157,13 @@ fn print_device_code_prompt(verification_url: &str, code: &str) {
 }
 
 pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<DeviceCode> {
+    if !opts.auth_config.include_openai_chatgpt_params {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "device code login is only supported for ChatGPT auth. Use browser login for configured OIDC auth.",
+        ));
+    }
+
     let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     let base_url = opts.issuer.trim_end_matches('/');
     let api_base_url = format!("{base_url}/api/accounts");
@@ -194,8 +201,7 @@ pub async fn complete_device_code_login(
     let redirect_uri = format!("{base_url}/deviceauth/callback");
 
     let tokens = crate::server::exchange_code_for_tokens(
-        base_url,
-        &opts.client_id,
+        &opts.auth_config,
         &redirect_uri,
         &pkce,
         &code_resp.authorization_code,

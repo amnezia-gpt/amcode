@@ -10,6 +10,7 @@ use crate::profile_toml::ConfigProfile;
 use crate::types::AnalyticsConfigToml;
 use crate::types::ApprovalsReviewer;
 use crate::types::AppsConfigToml;
+use crate::types::AuthConfigToml;
 use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
@@ -282,6 +283,9 @@ pub struct ConfigToml {
 
     /// Base URL override for the built-in `openai` model provider.
     pub openai_base_url: Option<String>,
+
+    /// OIDC-compatible auth server configuration used by interactive login.
+    pub auth: Option<AuthConfigToml>,
 
     /// Machine-local realtime audio device preferences used by realtime voice.
     #[serde(default)]

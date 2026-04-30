@@ -10,12 +10,13 @@
 use codex_app_server_protocol::AuthMode;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::Config;
-use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
+use codex_login::LoginAuthConfig;
 use codex_login::ServerOptions;
 use codex_login::login_with_agent_identity;
 use codex_login::login_with_api_key;
 use codex_login::logout_with_revoke;
+use codex_login::resolve_oidc_login_config;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -117,13 +118,16 @@ pub async fn login_with_chatgpt(
     codex_home: PathBuf,
     forced_chatgpt_workspace_id: Option<String>,
     cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_config: LoginAuthConfig,
 ) -> std::io::Result<()> {
+    let auth_config = resolve_oidc_login_config(auth_config).await;
     let opts = ServerOptions::new(
         codex_home,
-        CLIENT_ID.to_string(),
+        auth_config.client_id.clone(),
         forced_chatgpt_workspace_id,
         cli_auth_credentials_store_mode,
-    );
+    )
+    .with_auth_config(auth_config);
     let server = run_login_server(opts)?;
 
     print_login_server_start(server.actual_port, &server.auth_url);
@@ -147,6 +151,7 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
         config.codex_home.to_path_buf(),
         forced_chatgpt_workspace_id,
         config.cli_auth_credentials_store_mode,
+        LoginAuthConfig::from_config_toml(config.auth.clone()),
     )
     .await
     {
@@ -274,15 +279,21 @@ pub async fn run_login_with_device_code(
         std::process::exit(1);
     }
     let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
-    let mut opts = ServerOptions::new(
+    let mut auth_config = LoginAuthConfig::from_config_toml(config.auth.clone());
+    if let Some(client_id) = client_id {
+        auth_config.client_id = client_id;
+    }
+    if let Some(issuer) = issuer_base_url {
+        auth_config.issuer = issuer;
+    }
+    let auth_config = resolve_oidc_login_config(auth_config).await;
+    let opts = ServerOptions::new(
         config.codex_home.to_path_buf(),
-        client_id.unwrap_or(CLIENT_ID.to_string()),
+        auth_config.client_id.clone(),
         forced_chatgpt_workspace_id,
         config.cli_auth_credentials_store_mode,
-    );
-    if let Some(iss) = issuer_base_url {
-        opts.issuer = iss;
-    }
+    )
+    .with_auth_config(auth_config);
     match run_device_code_login(opts).await {
         Ok(()) => {
             eprintln!("{LOGIN_SUCCESS_MESSAGE}");
@@ -313,15 +324,21 @@ pub async fn run_login_with_device_code_fallback_to_browser(
     }
 
     let forced_chatgpt_workspace_id = config.forced_chatgpt_workspace_id.clone();
+    let mut auth_config = LoginAuthConfig::from_config_toml(config.auth.clone());
+    if let Some(client_id) = client_id {
+        auth_config.client_id = client_id;
+    }
+    if let Some(issuer) = issuer_base_url {
+        auth_config.issuer = issuer;
+    }
+    let auth_config = resolve_oidc_login_config(auth_config).await;
     let mut opts = ServerOptions::new(
         config.codex_home.to_path_buf(),
-        client_id.unwrap_or(CLIENT_ID.to_string()),
+        auth_config.client_id.clone(),
         forced_chatgpt_workspace_id,
         config.cli_auth_credentials_store_mode,
-    );
-    if let Some(iss) = issuer_base_url {
-        opts.issuer = iss;
-    }
+    )
+    .with_auth_config(auth_config);
     opts.open_browser = false;
 
     match run_device_code_login(opts.clone()).await {

@@ -35,7 +35,9 @@ use base64::Engine;
 use chrono::Utc;
 use codex_app_server_protocol::AuthMode;
 use codex_client::build_reqwest_client_with_custom_ca;
+use codex_config::types::AuthConfigToml;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::AuthEndpointConfigToml;
 use codex_utils_template::Template;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
@@ -50,6 +52,11 @@ use tracing::warn;
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const DEFAULT_PORT: u16 = 1455;
+const DEFAULT_CLIENT_ID: &str = crate::auth::CLIENT_ID;
+const DEFAULT_TOKEN_EXCHANGE_REQUESTED_TOKEN: &str = "openai-api-key";
+const DEFAULT_TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:id_token";
+const AMNEZIA_TOKEN_EXCHANGE_REQUESTED_TOKEN_TYPE: &str = "urn:amnezia-gpt:token-type:api_key";
+const AMNEZIA_ROUTER_AUDIENCE: &str = "urn:amnezia-gpt:resource:router";
 static LOGIN_ERROR_PAGE_TEMPLATE: LazyLock<Template> = LazyLock::new(|| {
     Template::parse(include_str!("assets/error.html"))
         .unwrap_or_else(|err| panic!("login error page template must parse: {err}"))
@@ -61,11 +68,195 @@ pub struct ServerOptions {
     pub codex_home: PathBuf,
     pub client_id: String,
     pub issuer: String,
+    pub auth_config: LoginAuthConfig,
     pub port: u16,
     pub open_browser: bool,
     pub force_state: Option<String>,
     pub forced_chatgpt_workspace_id: Option<String>,
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginAuthConfig {
+    pub issuer: String,
+    pub client_id: String,
+    pub scopes: Vec<String>,
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub revocation_endpoint: Option<String>,
+    pub requested_token_type: Option<String>,
+    pub router_audience: Option<String>,
+    pub include_openai_chatgpt_params: bool,
+}
+
+impl Default for LoginAuthConfig {
+    fn default() -> Self {
+        Self {
+            issuer: DEFAULT_ISSUER.to_string(),
+            client_id: DEFAULT_CLIENT_ID.to_string(),
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "offline_access".to_string(),
+                "api.connectors.read".to_string(),
+                "api.connectors.invoke".to_string(),
+            ],
+            authorization_endpoint: None,
+            token_endpoint: None,
+            revocation_endpoint: None,
+            requested_token_type: None,
+            router_audience: None,
+            include_openai_chatgpt_params: true,
+        }
+    }
+}
+
+impl LoginAuthConfig {
+    pub fn from_config_toml(config: Option<AuthConfigToml>) -> Self {
+        let Some(config) = config else {
+            return Self::default();
+        };
+
+        let endpoints = config.endpoints.unwrap_or(AuthEndpointConfigToml {
+            authorization: None,
+            token: None,
+            revocation: None,
+        });
+        let issuer = config.issuer.unwrap_or_else(|| DEFAULT_ISSUER.to_string());
+        let client_id = config
+            .client_id
+            .unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string());
+        let scopes = config.scopes.unwrap_or_else(|| {
+            vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "offline_access".to_string(),
+            ]
+        });
+
+        Self {
+            issuer,
+            client_id,
+            scopes,
+            authorization_endpoint: endpoints.authorization,
+            token_endpoint: endpoints.token,
+            revocation_endpoint: endpoints.revocation,
+            requested_token_type: config
+                .requested_token_type
+                .or_else(|| Some(AMNEZIA_TOKEN_EXCHANGE_REQUESTED_TOKEN_TYPE.to_string())),
+            router_audience: config
+                .router_audience
+                .or_else(|| Some(AMNEZIA_ROUTER_AUDIENCE.to_string())),
+            include_openai_chatgpt_params: false,
+        }
+    }
+
+    fn authorization_endpoint(&self) -> String {
+        self.authorization_endpoint
+            .clone()
+            .unwrap_or_else(|| format!("{}/oauth/authorize", self.issuer.trim_end_matches('/')))
+    }
+
+    pub(crate) fn token_endpoint(&self) -> String {
+        self.token_endpoint
+            .clone()
+            .unwrap_or_else(|| format!("{}/oauth/token", self.issuer.trim_end_matches('/')))
+    }
+
+    fn requested_token_type(&self) -> Option<&str> {
+        self.requested_token_type.as_deref()
+    }
+
+    fn router_audience(&self) -> Option<&str> {
+        self.router_audience.as_deref()
+    }
+
+    fn token_exchange_body(&self, subject_token: &str) -> String {
+        let mut form = vec![
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("client_id", self.client_id.as_str()),
+            ("subject_token", subject_token),
+            (
+                "subject_token_type",
+                DEFAULT_TOKEN_EXCHANGE_SUBJECT_TOKEN_TYPE,
+            ),
+        ];
+        if let Some(requested_token_type) = self.requested_token_type() {
+            form.push(("requested_token_type", requested_token_type));
+        } else {
+            form.push(("requested_token", DEFAULT_TOKEN_EXCHANGE_REQUESTED_TOKEN));
+        }
+        if let Some(audience) = self.router_audience() {
+            form.push(("audience", audience));
+        }
+        form.into_iter()
+            .map(|(key, value)| format!("{key}={}", urlencoding::encode(value)))
+            .collect::<Vec<_>>()
+            .join("&")
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OidcDiscoveryDocument {
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    revocation_endpoint: Option<String>,
+}
+
+pub async fn resolve_oidc_login_config(mut auth_config: LoginAuthConfig) -> LoginAuthConfig {
+    if auth_config.include_openai_chatgpt_params
+        || (auth_config.authorization_endpoint.is_some()
+            && auth_config.token_endpoint.is_some()
+            && auth_config.revocation_endpoint.is_some())
+    {
+        return auth_config;
+    }
+
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        auth_config.issuer.trim_end_matches('/')
+    );
+    let client = match build_reqwest_client_with_custom_ca(reqwest::Client::builder()) {
+        Ok(client) => client,
+        Err(err) => {
+            warn!("failed to build OIDC discovery client: {err}");
+            return auth_config;
+        }
+    };
+    let response = match client.get(discovery_url.as_str()).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            warn!("OIDC discovery request failed for {discovery_url}: {err}");
+            return auth_config;
+        }
+    };
+    if !response.status().is_success() {
+        warn!(
+            "OIDC discovery request returned non-success status for {discovery_url}: {}",
+            response.status()
+        );
+        return auth_config;
+    }
+    let discovery = match response.json::<OidcDiscoveryDocument>().await {
+        Ok(discovery) => discovery,
+        Err(err) => {
+            warn!("failed to parse OIDC discovery document from {discovery_url}: {err}");
+            return auth_config;
+        }
+    };
+    auth_config.authorization_endpoint = auth_config
+        .authorization_endpoint
+        .or(discovery.authorization_endpoint);
+    auth_config.token_endpoint = auth_config.token_endpoint.or(discovery.token_endpoint);
+    auth_config.revocation_endpoint = auth_config
+        .revocation_endpoint
+        .or(discovery.revocation_endpoint);
+    auth_config
 }
 
 impl ServerOptions {
@@ -80,12 +271,20 @@ impl ServerOptions {
             codex_home,
             client_id,
             issuer: DEFAULT_ISSUER.to_string(),
+            auth_config: LoginAuthConfig::default(),
             port: DEFAULT_PORT,
             open_browser: true,
             force_state: None,
             forced_chatgpt_workspace_id,
             cli_auth_credentials_store_mode,
         }
+    }
+
+    pub fn with_auth_config(mut self, auth_config: LoginAuthConfig) -> Self {
+        self.client_id = auth_config.client_id.clone();
+        self.issuer = auth_config.issuer.clone();
+        self.auth_config = auth_config;
+        self
     }
 }
 
@@ -148,8 +347,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
 
     let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
     let auth_url = build_authorize_url(
-        &opts.issuer,
-        &opts.client_id,
+        &opts.auth_config,
         &redirect_uri,
         &pkce,
         &state,
@@ -328,9 +526,7 @@ async fn process_request(
                 }
             };
 
-            match exchange_code_for_tokens(&opts.issuer, &opts.client_id, redirect_uri, pkce, &code)
-                .await
-            {
+            match exchange_code_for_tokens(&opts.auth_config, redirect_uri, pkce, &code).await {
                 Ok(tokens) => {
                     if let Err(message) = ensure_workspace_allowed(
                         opts.forced_chatgpt_workspace_id.as_deref(),
@@ -344,8 +540,9 @@ async fn process_request(
                             /*error_description*/ None,
                         );
                     }
-                    // Obtain API key via token-exchange and persist
-                    let api_key = obtain_api_key(&opts.issuer, &opts.client_id, &tokens.id_token)
+                    // Configured OIDC reuses the legacy OPENAI_API_KEY auth.json field as a
+                    // transitional storage slot for the exchanged router API key.
+                    let api_key = obtain_api_key(&opts.auth_config, &tokens.id_token)
                         .await
                         .ok();
                     if let Err(err) = persist_tokens_async(
@@ -466,8 +663,7 @@ fn send_response_with_disconnect(
 }
 
 fn build_authorize_url(
-    issuer: &str,
-    client_id: &str,
+    auth_config: &LoginAuthConfig,
     redirect_uri: &str,
     pkce: &PkceCodes,
     state: &str,
@@ -475,24 +671,24 @@ fn build_authorize_url(
 ) -> String {
     let mut query = vec![
         ("response_type".to_string(), "code".to_string()),
-        ("client_id".to_string(), client_id.to_string()),
+        ("client_id".to_string(), auth_config.client_id.to_string()),
         ("redirect_uri".to_string(), redirect_uri.to_string()),
-        (
-            "scope".to_string(),
-            "openid profile email offline_access api.connectors.read api.connectors.invoke"
-                .to_string(),
-        ),
+        ("scope".to_string(), auth_config.scopes.join(" ")),
         (
             "code_challenge".to_string(),
             pkce.code_challenge.to_string(),
         ),
         ("code_challenge_method".to_string(), "S256".to_string()),
-        ("id_token_add_organizations".to_string(), "true".to_string()),
-        ("codex_cli_simplified_flow".to_string(), "true".to_string()),
         ("state".to_string(), state.to_string()),
-        ("originator".to_string(), originator().value),
     ];
-    if let Some(workspace_id) = forced_chatgpt_workspace_id {
+    if auth_config.include_openai_chatgpt_params {
+        query.push(("id_token_add_organizations".to_string(), "true".to_string()));
+        query.push(("codex_cli_simplified_flow".to_string(), "true".to_string()));
+        query.push(("originator".to_string(), originator().value));
+    }
+    if auth_config.include_openai_chatgpt_params
+        && let Some(workspace_id) = forced_chatgpt_workspace_id
+    {
         query.push(("allowed_workspace_id".to_string(), workspace_id.to_string()));
     }
     let qs = query
@@ -500,7 +696,7 @@ fn build_authorize_url(
         .map(|(k, v)| format!("{k}={}", urlencoding::encode(&v)))
         .collect::<Vec<_>>()
         .join("&");
-    format!("{issuer}/oauth/authorize?{qs}")
+    format!("{}?{qs}", auth_config.authorization_endpoint())
 }
 
 fn generate_state() -> String {
@@ -682,8 +878,7 @@ fn sanitize_url_for_logging(url: &str) -> String {
 /// fields from parsed token responses and redacted transport errors, but does not log the final
 /// callback-layer `%err` string.
 pub(crate) async fn exchange_code_for_tokens(
-    issuer: &str,
-    client_id: &str,
+    auth_config: &LoginAuthConfig,
     redirect_uri: &str,
     pkce: &PkceCodes,
     code: &str,
@@ -697,18 +892,18 @@ pub(crate) async fn exchange_code_for_tokens(
 
     let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
     info!(
-        issuer = %sanitize_url_for_logging(issuer),
+        issuer = %sanitize_url_for_logging(&auth_config.issuer),
         redirect_uri = %redirect_uri,
         "starting oauth token exchange"
     );
     let resp = client
-        .post(format!("{issuer}/oauth/token"))
+        .post(auth_config.token_endpoint())
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(format!(
             "grant_type=authorization_code&code={}&redirect_uri={}&client_id={}&code_verifier={}",
             urlencoding::encode(code),
             urlencoding::encode(redirect_uri),
-            urlencoding::encode(client_id),
+            urlencoding::encode(&auth_config.client_id),
             urlencoding::encode(&pkce.code_verifier)
         ))
         .send()
@@ -1058,8 +1253,7 @@ fn html_escape(input: &str) -> String {
 
 /// Exchanges an authenticated ID token for an API-key style access token.
 pub(crate) async fn obtain_api_key(
-    issuer: &str,
-    client_id: &str,
+    auth_config: &LoginAuthConfig,
     id_token: &str,
 ) -> io::Result<String> {
     // Token exchange for an API key access token
@@ -1068,17 +1262,11 @@ pub(crate) async fn obtain_api_key(
         access_token: String,
     }
     let client = build_reqwest_client_with_custom_ca(reqwest::Client::builder())?;
+    let body = auth_config.token_exchange_body(id_token);
     let resp = client
-        .post(format!("{issuer}/oauth/token"))
+        .post(auth_config.token_endpoint())
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(format!(
-            "grant_type={}&client_id={}&requested_token={}&subject_token={}&subject_token_type={}",
-            urlencoding::encode("urn:ietf:params:oauth:grant-type:token-exchange"),
-            urlencoding::encode(client_id),
-            urlencoding::encode("openai-api-key"),
-            urlencoding::encode(id_token),
-            urlencoding::encode("urn:ietf:params:oauth:token-type:id_token")
-        ))
+        .body(body)
         .send()
         .await
         .map_err(io::Error::other)?;
@@ -1095,7 +1283,9 @@ pub(crate) async fn obtain_api_key(
 mod tests {
     use pretty_assertions::assert_eq;
 
+    use super::LoginAuthConfig;
     use super::TokenEndpointErrorDetail;
+    use super::build_authorize_url;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::parse_token_endpoint_error;
@@ -1103,6 +1293,78 @@ mod tests {
     use super::redact_sensitive_url_parts;
     use super::render_login_error_page;
     use super::sanitize_url_for_logging;
+    use crate::pkce::PkceCodes;
+
+    #[test]
+    fn configured_oidc_auth_url_omits_openai_specific_params() {
+        let auth_config = LoginAuthConfig {
+            issuer: "https://auth.example.com".to_string(),
+            client_id: "amcode".to_string(),
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "offline_access".to_string(),
+            ],
+            authorization_endpoint: None,
+            token_endpoint: None,
+            revocation_endpoint: None,
+            requested_token_type: Some("urn:amnezia-gpt:token-type:api_key".to_string()),
+            router_audience: Some("urn:amnezia-gpt:resource:router".to_string()),
+            include_openai_chatgpt_params: false,
+        };
+        let pkce = PkceCodes {
+            code_verifier: "verifier".to_string(),
+            code_challenge: "challenge".to_string(),
+        };
+
+        let url = build_authorize_url(
+            &auth_config,
+            "http://localhost:1455/auth/callback",
+            &pkce,
+            "state",
+            Some("workspace"),
+        );
+
+        assert!(url.starts_with("https://auth.example.com/oauth/authorize?"));
+        assert!(url.contains("client_id=amcode"));
+        assert!(url.contains("scope=openid%20profile%20email%20offline_access"));
+        assert!(!url.contains("api.connectors.read"));
+        assert!(!url.contains("api.connectors.invoke"));
+        assert!(!url.contains("id_token_add_organizations"));
+        assert!(!url.contains("codex_cli_simplified_flow"));
+        assert!(!url.contains("originator"));
+        assert!(!url.contains("allowed_workspace_id"));
+    }
+
+    #[test]
+    fn configured_oidc_token_exchange_requests_router_api_key() {
+        let auth_config = LoginAuthConfig {
+            issuer: "https://auth.example.com".to_string(),
+            client_id: "amcode".to_string(),
+            scopes: vec!["openid".to_string()],
+            authorization_endpoint: None,
+            token_endpoint: None,
+            revocation_endpoint: None,
+            requested_token_type: Some("urn:amnezia-gpt:token-type:api_key".to_string()),
+            router_audience: Some("urn:amnezia-gpt:resource:router".to_string()),
+            include_openai_chatgpt_params: false,
+        };
+
+        let body = auth_config.token_exchange_body("id-token");
+
+        assert!(
+            body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange")
+        );
+        assert!(body.contains("client_id=amcode"));
+        assert!(body.contains("subject_token=id-token"));
+        assert!(
+            body.contains("subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token")
+        );
+        assert!(body.contains("requested_token_type=urn%3Aamnezia-gpt%3Atoken-type%3Aapi_key"));
+        assert!(body.contains("audience=urn%3Aamnezia-gpt%3Aresource%3Arouter"));
+        assert!(!body.contains("requested_token=openai-api-key"));
+    }
 
     #[test]
     fn parse_token_endpoint_error_prefers_error_description() {
