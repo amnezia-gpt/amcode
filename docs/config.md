@@ -8,7 +8,7 @@ For a full configuration reference, see [this documentation](https://developers.
 
 ## Connecting to MCP servers
 
-Codex can connect to MCP servers configured in `~/.codex/config.toml`. See the configuration reference for the latest MCP server options:
+Codex can connect to MCP servers configured in `~/.amcode/config.toml`. See the configuration reference for the latest MCP server options:
 
 - https://developers.openai.com/codex/config-reference
 
@@ -29,7 +29,7 @@ resources, review those read/write race conditions before enabling this setting.
 ## MCP tool approvals
 
 Codex stores approval defaults and per-tool overrides for custom MCP servers
-under `mcp_servers` in `~/.codex/config.toml`. Set
+under `mcp_servers` in `~/.amcode/config.toml`. Set
 `default_tools_approval_mode` on the server to apply a default to every tool,
 and use per-tool `approval_mode` entries for exceptions:
 
@@ -64,7 +64,7 @@ The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schem
 
 Codex stores the SQLite-backed state DB under `sqlite_home` (config key) or the
 `CODEX_SQLITE_HOME` environment variable. When unset, WorkspaceWrite sandbox
-sessions default to a temp directory; other modes default to `CODEX_HOME`.
+sessions default to a temp directory; other modes default to `AMCODE_HOME`.
 
 ## Custom CA Certificates
 

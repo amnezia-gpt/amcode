@@ -7,11 +7,11 @@ We provide Codex CLI as a standalone executable to ensure a zero-dependency inst
 Today, the easiest way to install Codex is via `npm`:
 
 ```shell
-npm i -g @openai/codex
+npm i -g @amnezia-gpt/amcode
 codex
 ```
 
-You can also install via Homebrew (`brew install --cask codex`) or download a platform-specific release directly from our [GitHub Releases](https://github.com/openai/codex/releases).
+You can also download a platform-specific release directly from our [GitHub Releases](https://github.com/amnezia-gpt/amcode/releases).
 
 ## Documentation quickstart
 
@@ -87,8 +87,8 @@ codex --sandbox workspace-write
 codex --sandbox danger-full-access
 ```
 
-The same setting can be persisted in `~/.codex/config.toml` via the top-level `sandbox_mode = "MODE"` key, e.g. `sandbox_mode = "workspace-write"`.
-In `workspace-write`, Codex also includes `~/.codex/memories` in its writable roots so memory maintenance does not require an extra approval.
+The same setting can be persisted in `~/.amcode/config.toml` via the top-level `sandbox_mode = "MODE"` key, e.g. `sandbox_mode = "workspace-write"`.
+In `workspace-write`, Codex also includes `~/.amcode/memories` in its writable roots so memory maintenance does not require an extra approval.
 
 ## Code Organization
 

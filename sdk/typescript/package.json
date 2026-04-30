@@ -1,10 +1,10 @@
 {
-  "name": "@openai/codex-sdk",
+  "name": "@amnezia-gpt/amcode-sdk",
   "version": "0.0.0-dev",
   "description": "TypeScript SDK for Codex APIs.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/openai/codex.git",
+    "url": "git+https://github.com/amnezia-gpt/amcode.git",
     "directory": "sdk/typescript"
   },
   "keywords": [
