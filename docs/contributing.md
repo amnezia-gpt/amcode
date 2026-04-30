@@ -21,6 +21,44 @@ Start every non-trivial change with a GitHub issue. The issue should describe:
 Keep issues focused. Multiple unrelated changes should be tracked by separate
 issues and implemented in separate pull requests.
 
+### Issue Task Control
+
+Use GitHub issues as the shared task-control system between people and Codex
+runs. The issue should be useful when opened later in a different thread or
+working session.
+
+Keep the issue body stable after planning is complete. Treat it as the
+canonical scope, not as a running execution log. It should contain:
+
+- context and goal;
+- scope and explicit non-scope;
+- high-level task checklist or links to sub-issues;
+- acceptance criteria;
+- known risks and compatibility notes;
+- suggested verification.
+
+Use issue comments for execution history:
+
+- planning notes that refine the approach;
+- progress updates;
+- implementation decisions;
+- blockers;
+- verification results;
+- links to related branches and pull requests.
+
+It is fine to edit the issue body while turning a rough issue into an
+actionable plan. After implementation starts, prefer comments over repeated
+body edits. Only edit the body again when the scope, acceptance criteria, or
+canonical task list actually changes.
+
+For large work, prefer separate issues or GitHub sub-issues over a long
+checkbox list. A task should become its own issue when it can be implemented or
+reviewed independently, has separate risks, or may need a separate pull request.
+
+Do not use repo-local `PLAN.md` files as the durable source of truth for normal
+GitHub-tracked work. Temporary local notes are fine, but durable task state
+belongs in GitHub issues, comments, sub-issues, and pull requests.
+
 ### Branch Naming
 
 Create issue branches from `amnezia`:
@@ -66,6 +104,7 @@ The PR body should include:
 - a short summary of the change;
 - tests run, or a clear note if tests were not run;
 - any follow-up work or compatibility risks.
+- any issue task-control updates that reviewers should know about.
 
 Example:
 

@@ -60,7 +60,7 @@ async fn run_codex_cli(
     let codex_cli = codex_utils_cargo_bin::cargo_bin("codex")?;
     let mut env = HashMap::new();
     env.insert(
-        "CODEX_HOME".to_string(),
+        "AMCODE_HOME".to_string(),
         codex_home.as_ref().display().to_string(),
     );
 
