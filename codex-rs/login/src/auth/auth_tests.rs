@@ -10,12 +10,19 @@ use codex_protocol::auth::PlanType as InternalPlanType;
 use base64::Engine;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ModelProviderAuthInfo;
+use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tempfile::tempdir;
+use wiremock::Mock;
+use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::body_string_contains;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
 
 #[tokio::test]
 async fn refresh_without_id_token() {
@@ -36,6 +43,7 @@ async fn refresh_without_id_token() {
     );
     let updated = super::persist_tokens(
         &storage,
+        /*api_key*/ None,
         /*id_token*/ None,
         Some("new-access-token".to_string()),
         Some("new-refresh-token".to_string()),
@@ -46,6 +54,96 @@ async fn refresh_without_id_token() {
     assert_eq!(tokens.id_token.raw_jwt, fake_jwt);
     assert_eq!(tokens.access_token, "new-access-token");
     assert_eq!(tokens.refresh_token, "new-refresh-token");
+}
+
+#[tokio::test]
+async fn oidc_refresh_exchanges_refreshed_id_token_for_api_key() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let refreshed_id_token = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: None,
+        chatgpt_account_id: None,
+    })
+    .expect("fake jwt");
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains("grant_type=refresh_token"))
+        .and(body_string_contains("refresh_token=test-refresh-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id_token": refreshed_id_token,
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .and(body_string_contains(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange",
+        ))
+        .and(body_string_contains(
+            "requested_token_type=urn%3Aamnezia-gpt%3Atoken-type%3Aapi_key",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "router-api-key",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = tempdir().unwrap();
+    write_auth_file(
+        AuthFileParams {
+            openai_api_key: None,
+            chatgpt_plan_type: Some("pro".to_string()),
+            chatgpt_account_id: None,
+        },
+        codex_home.path(),
+    )
+    .expect("failed to write auth file");
+    let token_endpoint = format!("{}/oauth/token", server.uri());
+    let manager = AuthManager::new_with_auth_config(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+        crate::server::LoginAuthConfig {
+            issuer: server.uri(),
+            client_id: "amcode".to_string(),
+            scopes: vec!["openid".to_string()],
+            authorization_endpoint: None,
+            token_endpoint: Some(token_endpoint),
+            revocation_endpoint: None,
+            requested_token_type: Some("urn:amnezia-gpt:token-type:api_key".to_string()),
+            router_audience: Some("urn:amnezia-gpt:resource:router".to_string()),
+            include_openai_chatgpt_params: false,
+        },
+    )
+    .await;
+
+    manager
+        .refresh_token_from_authority()
+        .await
+        .expect("refresh should succeed");
+
+    let auth_dot_json = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
+        .expect("auth file should load")
+        .expect("auth file should exist");
+    assert_eq!(
+        auth_dot_json.openai_api_key.as_deref(),
+        Some("router-api-key")
+    );
+    let tokens = auth_dot_json.tokens.expect("tokens should exist");
+    assert_eq!(tokens.access_token, "new-access-token");
+    assert_eq!(tokens.refresh_token, "new-refresh-token");
+
+    let auth = manager.auth().await.expect("auth should reload");
+    let token = auth.get_token().expect("token should resolve");
+    assert_eq!(token, "router-api-key");
+    server.verify().await;
 }
 
 #[test]

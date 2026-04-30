@@ -264,6 +264,43 @@
         }
       ]
     },
+    "AuthConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "client_id": {
+          "description": "Public OAuth/OIDC client identifier.",
+          "type": "string"
+        },
+        "endpoints": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AuthEndpointConfigToml"
+            }
+          ],
+          "description": "Optional explicit endpoint overrides. When unset, endpoints are derived from the issuer or discovered from OIDC metadata by the auth layer."
+        },
+        "issuer": {
+          "description": "OIDC issuer used for interactive browser login.",
+          "type": "string"
+        },
+        "requested_token_type": {
+          "description": "Token type requested when exchanging OIDC login credentials for a router API key.",
+          "type": "string"
+        },
+        "router_audience": {
+          "description": "Resource audience requested when exchanging OIDC login credentials for a router API key.",
+          "type": "string"
+        },
+        "scopes": {
+          "description": "Scopes requested during browser login.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "AuthCredentialsStoreMode": {
       "description": "Determine where Codex should store CLI auth credentials.",
       "oneOf": [
@@ -296,6 +333,24 @@
           "type": "string"
         }
       ]
+    },
+    "AuthEndpointConfigToml": {
+      "additionalProperties": false,
+      "properties": {
+        "authorization": {
+          "description": "Explicit authorization endpoint override.",
+          "type": "string"
+        },
+        "revocation": {
+          "description": "Explicit revocation endpoint override.",
+          "type": "string"
+        },
+        "token": {
+          "description": "Explicit token endpoint override.",
+          "type": "string"
+        }
+      },
+      "type": "object"
     },
     "AutoReviewToml": {
       "properties": {
@@ -2452,6 +2507,14 @@
       ],
       "default": null,
       "description": "Machine-local realtime audio device preferences used by realtime voice."
+    },
+    "auth": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AuthConfigToml"
+        }
+      ],
+      "description": "OIDC-compatible auth server configuration used by interactive login."
     },
     "auto_review": {
       "allOf": [

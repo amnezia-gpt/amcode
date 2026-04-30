@@ -6,6 +6,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::ServerOptions;
 use codex_login::auth::load_auth_dot_json;
+use codex_login::request_device_code;
 use codex_login::run_device_code_login;
 use serde_json::json;
 use std::sync::Arc;
@@ -109,8 +110,32 @@ fn server_opts(
         cli_auth_credentials_store_mode,
     );
     opts.issuer = issuer;
+    opts.auth_config.issuer = opts.issuer.clone();
+    opts.auth_config.client_id = opts.client_id.clone();
     opts.open_browser = false;
     opts
+}
+
+#[tokio::test]
+async fn device_code_login_is_disabled_for_configured_oidc_auth() -> anyhow::Result<()> {
+    let codex_home = tempdir().unwrap();
+    let mut opts = server_opts(
+        &codex_home,
+        "https://auth.example.test".to_string(),
+        AuthCredentialsStoreMode::File,
+    );
+    opts.auth_config.include_openai_chatgpt_params = false;
+
+    let err = request_device_code(&opts)
+        .await
+        .expect_err("configured OIDC auth should not use legacy device-code endpoints");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(
+        err.to_string()
+            .contains("Use browser login for configured OIDC auth")
+    );
+    Ok(())
 }
 
 #[tokio::test]

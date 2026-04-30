@@ -298,14 +298,15 @@ use codex_feedback::FeedbackUploadOptions;
 use codex_git_utils::git_diff_to_remote;
 use codex_git_utils::resolve_root_git_project_for_trust;
 use codex_login::AuthManager;
-use codex_login::CLIENT_ID;
 use codex_login::CodexAuth;
+use codex_login::LoginAuthConfig;
 use codex_login::ServerOptions as LoginServerOptions;
 use codex_login::ShutdownHandle;
 use codex_login::auth::login_with_chatgpt_auth_tokens;
 use codex_login::complete_device_code_login;
 use codex_login::login_with_api_key;
 use codex_login::request_device_code;
+use codex_login::resolve_oidc_login_config;
 use codex_login::run_login_server;
 use codex_mcp::McpRuntimeEnvironment;
 use codex_mcp::McpServerStatusSnapshot;
@@ -1401,14 +1402,17 @@ impl CodexMessageProcessor {
             });
         }
 
+        let auth_config =
+            resolve_oidc_login_config(LoginAuthConfig::from_config_toml(config.auth.clone())).await;
         let opts = LoginServerOptions {
             open_browser: false,
             ..LoginServerOptions::new(
                 config.codex_home.to_path_buf(),
-                CLIENT_ID.to_string(),
+                auth_config.client_id.clone(),
                 config.forced_chatgpt_workspace_id.clone(),
                 config.cli_auth_credentials_store_mode,
             )
+            .with_auth_config(auth_config)
         };
         #[cfg(debug_assertions)]
         let opts = {

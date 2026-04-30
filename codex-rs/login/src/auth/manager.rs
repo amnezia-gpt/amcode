@@ -30,6 +30,8 @@ use crate::auth::storage::AuthStorageBackend;
 use crate::auth::storage::create_auth_storage;
 use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
+use crate::server::LoginAuthConfig;
+use crate::server::obtain_api_key;
 use crate::token_data::TokenData;
 use crate::token_data::parse_chatgpt_jwt_claims;
 use crate::token_data::parse_jwt_expiration;
@@ -313,8 +315,18 @@ impl CodexAuth {
         match self {
             Self::ApiKey(auth) => Ok(auth.api_key.clone()),
             Self::Chatgpt(_) | Self::ChatgptAuthTokens(_) => {
-                let access_token = self.get_token_data()?.access_token;
-                Ok(access_token)
+                let auth_dot_json = self
+                    .get_current_auth_json()
+                    .ok_or_else(|| std::io::Error::other("Token data is not available."))?;
+                // Configured OIDC stores the exchanged router API key in this legacy field for
+                // now so the existing bearer-token path can be reused.
+                if let Some(api_key) = auth_dot_json.openai_api_key {
+                    return Ok(api_key);
+                }
+                Ok(auth_dot_json
+                    .tokens
+                    .ok_or_else(|| std::io::Error::other("Token data is not available."))?
+                    .access_token)
             }
             Self::AgentIdentity(_) => Err(std::io::Error::other(
                 "agent identity auth does not expose a bearer token",
@@ -760,6 +772,7 @@ async fn load_auth(
 // Persist refreshed tokens into auth storage and update last_refresh.
 fn persist_tokens(
     storage: &Arc<dyn AuthStorageBackend>,
+    api_key: Option<String>,
     id_token: Option<String>,
     access_token: Option<String>,
     refresh_token: Option<String>,
@@ -777,6 +790,9 @@ fn persist_tokens(
     }
     if let Some(refresh_token) = refresh_token {
         tokens.refresh_token = refresh_token;
+    }
+    if let Some(api_key) = api_key {
+        auth_dot_json.openai_api_key = Some(api_key);
     }
     auth_dot_json.last_refresh = Some(Utc::now());
     storage.save(&auth_dot_json)?;
@@ -825,6 +841,47 @@ async fn request_chatgpt_token_refresh(
                 format!("Failed to refresh token: {status}: {message}"),
             )))
         }
+    }
+}
+
+async fn request_oidc_token_refresh(
+    auth_config: &LoginAuthConfig,
+    refresh_token: &str,
+    client: &CodexHttpClient,
+) -> Result<RefreshResponse, RefreshTokenError> {
+    let body = format!(
+        "grant_type={}&client_id={}&refresh_token={}",
+        urlencoding::encode("refresh_token"),
+        urlencoding::encode(&auth_config.client_id),
+        urlencoding::encode(refresh_token)
+    );
+
+    let response = client
+        .post(auth_config.token_endpoint().as_str())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|err| RefreshTokenError::Transient(std::io::Error::other(err)))?;
+
+    let status = response.status();
+    if status.is_success() {
+        return response
+            .json::<RefreshResponse>()
+            .await
+            .map_err(|err| RefreshTokenError::Transient(std::io::Error::other(err)));
+    }
+
+    let body = response.text().await.unwrap_or_default();
+    tracing::error!("Failed to refresh OIDC token: {status}: {body}");
+    if status == StatusCode::UNAUTHORIZED {
+        let failed = classify_refresh_token_failure(&body);
+        Err(RefreshTokenError::Permanent(failed))
+    } else {
+        let message = try_parse_error_message(&body);
+        Err(RefreshTokenError::Transient(std::io::Error::other(
+            format!("Failed to refresh OIDC token: {status}: {message}"),
+        )))
     }
 }
 
@@ -1229,6 +1286,7 @@ pub struct AuthManager {
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     forced_chatgpt_workspace_id: RwLock<Option<String>>,
     chatgpt_base_url: Option<String>,
+    auth_config: LoginAuthConfig,
     refresh_lock: Semaphore,
     external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
 }
@@ -1251,6 +1309,11 @@ pub trait AuthManagerConfig {
 
     /// Returns the ChatGPT backend base URL used for first-party backend authorization.
     fn chatgpt_base_url(&self) -> String;
+
+    /// Returns the interactive login auth configuration used for token refresh.
+    fn login_auth_config(&self) -> LoginAuthConfig {
+        LoginAuthConfig::default()
+    }
 }
 
 impl Debug for AuthManager {
@@ -1268,6 +1331,7 @@ impl Debug for AuthManager {
                 &self.forced_chatgpt_workspace_id,
             )
             .field("chatgpt_base_url", &self.chatgpt_base_url)
+            .field("auth_config", &self.auth_config)
             .field("has_external_auth", &self.has_external_auth())
             .finish_non_exhaustive()
     }
@@ -1283,6 +1347,23 @@ impl AuthManager {
         enable_codex_api_key_env: bool,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
         chatgpt_base_url: Option<String>,
+    ) -> Self {
+        Self::new_with_auth_config(
+            codex_home,
+            enable_codex_api_key_env,
+            auth_credentials_store_mode,
+            chatgpt_base_url,
+            LoginAuthConfig::default(),
+        )
+        .await
+    }
+
+    async fn new_with_auth_config(
+        codex_home: PathBuf,
+        enable_codex_api_key_env: bool,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        chatgpt_base_url: Option<String>,
+        auth_config: LoginAuthConfig,
     ) -> Self {
         let managed_auth = load_auth(
             &codex_home,
@@ -1302,6 +1383,7 @@ impl AuthManager {
             auth_credentials_store_mode,
             forced_chatgpt_workspace_id: RwLock::new(None),
             chatgpt_base_url,
+            auth_config,
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
         }
@@ -1321,6 +1403,7 @@ impl AuthManager {
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
             chatgpt_base_url: None,
+            auth_config: LoginAuthConfig::default(),
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
         })
@@ -1339,6 +1422,7 @@ impl AuthManager {
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
             chatgpt_base_url: None,
+            auth_config: LoginAuthConfig::default(),
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(None),
         })
@@ -1355,6 +1439,7 @@ impl AuthManager {
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
             chatgpt_base_url: None,
+            auth_config: LoginAuthConfig::default(),
             refresh_lock: Semaphore::new(/*permits*/ 1),
             external_auth: RwLock::new(Some(
                 Arc::new(BearerTokenRefresher::new(config)) as Arc<dyn ExternalAuth>
@@ -1573,16 +1658,36 @@ impl AuthManager {
         )
     }
 
+    async fn shared_with_auth_config(
+        codex_home: PathBuf,
+        enable_codex_api_key_env: bool,
+        auth_credentials_store_mode: AuthCredentialsStoreMode,
+        chatgpt_base_url: Option<String>,
+        auth_config: LoginAuthConfig,
+    ) -> Arc<Self> {
+        Arc::new(
+            Self::new_with_auth_config(
+                codex_home,
+                enable_codex_api_key_env,
+                auth_credentials_store_mode,
+                chatgpt_base_url,
+                auth_config,
+            )
+            .await,
+        )
+    }
+
     /// Convenience constructor returning an `Arc` wrapper from resolved config.
     pub async fn shared_from_config(
         config: &impl AuthManagerConfig,
         enable_codex_api_key_env: bool,
     ) -> Arc<Self> {
-        let auth_manager = Self::shared(
+        let auth_manager = Self::shared_with_auth_config(
             config.codex_home(),
             enable_codex_api_key_env,
             config.cli_auth_credentials_store_mode(),
             Some(config.chatgpt_base_url()),
+            config.login_auth_config(),
         )
         .await;
         auth_manager.set_forced_chatgpt_workspace_id(config.forced_chatgpt_workspace_id());
@@ -1843,10 +1948,26 @@ impl AuthManager {
         auth: &ChatgptAuth,
         refresh_token: String,
     ) -> Result<(), RefreshTokenError> {
-        let refresh_response = request_chatgpt_token_refresh(refresh_token, auth.client()).await?;
+        let refresh_response = if self.auth_config.include_openai_chatgpt_params {
+            request_chatgpt_token_refresh(refresh_token, auth.client()).await?
+        } else {
+            request_oidc_token_refresh(&self.auth_config, &refresh_token, auth.client()).await?
+        };
+        let api_key = if self.auth_config.include_openai_chatgpt_params {
+            None
+        } else if let Some(id_token) = refresh_response.id_token.as_deref() {
+            Some(
+                obtain_api_key(&self.auth_config, id_token)
+                    .await
+                    .map_err(RefreshTokenError::Transient)?,
+            )
+        } else {
+            None
+        };
 
         persist_tokens(
             auth.storage(),
+            api_key,
             refresh_response.id_token,
             refresh_response.access_token,
             refresh_response.refresh_token,
