@@ -1,97 +1,114 @@
 ## Contributing
 
-**External contributions are by invitation only**
+`amcode` is a fork of `openai/codex`. We keep the upstream Codex engineering
+style where it helps, but use a fork-specific branch workflow:
 
-At this time, the Codex team does not accept unsolicited code contributions.
+- `main` is reserved for syncing upstream `openai/codex`.
+- `amnezia` is the default working branch for amcode development.
+- Feature and fix branches are created from `amnezia`.
+- Pull requests target `amnezia`.
 
-If you would like to propose a new feature or a change in behavior, please open an issue describing the proposal or upvote an existing enhancement request. We prioritize new features based on community feedback, alignment with our roadmap, and consistency across all Codex surfaces (CLI, IDE extensions, web, etc.).
+### Issue-First Workflow
 
-If you encounter a bug, please open a bug report or verify that an existing report already covers the issue. If you would like to help, we encourage you to contribute by sharing analysis, reproduction details, root-cause hypotheses, or a high-level outline of a potential fix directly in the issue thread.
+Start every non-trivial change with a GitHub issue. The issue should describe:
 
-The Codex team may invite an external contributor to submit a pull request when:
+- the problem or goal;
+- the intended scope;
+- acceptance criteria;
+- relevant risks or compatibility concerns;
+- suggested tests, when known.
 
-- the problem is well understood,
-- the proposed approach aligns with the team’s intended solution, and
-- the issue is deemed high-impact and high-priority.
+Keep issues focused. Multiple unrelated changes should be tracked by separate
+issues and implemented in separate pull requests.
 
-Pull requests that have not been explicitly invited by a member of the Codex team will be closed without review.
+### Branch Naming
 
-**Why we do not generally accept external code contributions**
+Create issue branches from `amnezia`:
 
-In the past, the Codex team accepted external pull requests for bug fixes. While we appreciated the effort and engagement from the community, this model did not scale well.
+```bash
+git checkout amnezia
+git pull origin amnezia
+git checkout -b codex/issue-2-amcode-home
+```
 
-Many contributions were made without full visibility into the architectural context, system-level constraints, or near-term roadmap considerations that guide Codex development. Others focused on issues that were low priority or affected a very small subset of users. Reviewing and iterating on these PRs often took more time than implementing the fix directly, and diverted attention from higher-priority work.
+Use this branch pattern:
 
-The most valuable contributions consistently came from community members who demonstrated deep understanding of a problem domain. That expertise is most helpful when shared early -- through detailed bug reports, analysis, and design discussion in issues. Identifying the right solution is typically the hard part; implementing it is comparatively straightforward with the help of Codex itself.
+```text
+codex/issue-<number>-<short-slug>
+```
 
-For these reasons, we focus external contributions on discussion, analysis, and feedback, and reserve code changes for cases where a targeted invitation makes sense.
+Examples:
 
-### Development workflow
+```text
+codex/issue-2-amcode-home
+codex/issue-3-amnezia-auth
+codex/issue-4-provider-strategy
+```
 
-If you are invited by a Codex team member to contribute a PR, here is the recommended development workflow.
+### Development Workflow
 
-- Create a _topic branch_ from `main` - e.g. `feat/interactive-prompt`.
-- Keep your changes focused. Multiple unrelated fixes should be opened as separate PRs.
-- Ensure your change is free of lint warnings and test failures.
+- Keep changes focused on the linked issue.
+- Prefer small pull requests with clear review boundaries.
+- Follow the Rust and TUI conventions in `AGENTS.md`.
+- If you change Rust code, run `just fmt` in `codex-rs` after edits.
+- Run the most specific relevant tests for the crates or packages changed.
+- If you change config types, update generated schemas as required by
+  `AGENTS.md`.
+- If you change dependencies, update the matching Bazel lockfiles as required.
 
-### Guidance for invited code contributions
+### Pull Requests
 
-1. **Start with an issue.** Open a new one or comment on an existing discussion so we can agree on the solution before code is written.
-2. **Add or update tests.** A bug fix should generally come with test coverage that fails before your change and passes afterwards. 100% coverage is not required, but aim for meaningful assertions.
-3. **Document behavior.** If your change affects user-facing behavior, update the README, inline help (`codex --help`), or relevant example projects.
-4. **Keep commits atomic.** Each commit should compile and the tests should pass. This makes reviews and potential rollbacks easier.
+Open pull requests against `amnezia`, not `main`.
 
-### Model metadata updates
+The PR body should include:
 
-When a change updates model catalogs or model metadata (`/models` payloads, presets, or fixtures):
+- a linked issue, preferably `Fixes #<number>` or `Refs #<number>`;
+- a short summary of the change;
+- tests run, or a clear note if tests were not run;
+- any follow-up work or compatibility risks.
 
-- Set `input_modalities` explicitly for any model that does not support images.
-- Keep compatibility defaults in mind: omitted `input_modalities` currently implies text + image support.
-- Ensure client surfaces that accept images (for example, TUI paste/attach) consume the same capability signal.
-- Add/update tests that cover unsupported-image behavior and warning paths.
+Example:
 
-### Opening a pull request (by invitation only)
+```text
+Fixes #2
 
-- Fill in the PR template (or include similar information) - **What? Why? How?**
-- Include a link to a bug report or enhancement request in the issue tracker
-- Run **all** checks locally. Use the root `just` helpers so you stay consistent with the rest of the workspace: `just fmt`, `just fix -p <crate>` for the crate you touched, and the relevant tests (e.g., `cargo test -p codex-tui` or `just test` if you need a full sweep). CI failures that could have been caught locally slow down the process.
-- Make sure your branch is up-to-date with `main` and that you have resolved merge conflicts.
-- Mark the PR as **Ready for review** only when you believe it is in a merge-able state.
+## Summary
+- Add AMCODE_HOME resolution.
+- Move default home from ~/.codex to ~/.amcode.
 
-### Review process
+## Tests
+- cargo test -p codex-core config_home
+```
 
-1. One maintainer will be assigned as a primary reviewer.
-2. If your invited PR introduces scope or behavior that was not previously discussed and approved, we may close the PR.
-3. We may ask for changes. Please do not take this personally. We value the work, but we also value consistency and long-term maintainability.
-4. When there is consensus that the PR meets the bar, a maintainer will squash-and-merge.
+### Review Process
 
-### Community values
+Reviews should focus first on correctness, compatibility, and test coverage.
+For fork-specific changes, also check that:
 
-- **Be kind and inclusive.** Treat others with respect; we follow the [Contributor Covenant](https://www.contributor-covenant.org/).
-- **Assume good intent.** Written communication is hard - err on the side of generosity.
-- **Teach & learn.** If you spot something confusing, open an issue or discussion with suggestions or clarifications.
+- `main` remains suitable for upstream sync;
+- Codex user data is not modified accidentally;
+- OpenAI/Codex-specific behavior is either preserved intentionally or replaced
+  explicitly for amcode;
+- docs and schemas are updated when user-facing behavior changes.
 
-### Getting help
+### Upstream Sync
 
-If you run into problems setting up the project, would like feedback on an idea, or just want to say _hi_ - please open a Discussion topic or jump into the relevant issue. We are happy to help.
+Use `main` only to track upstream Codex:
 
-Together we can make Codex CLI an incredible tool. **Happy hacking!** :rocket:
+```bash
+git checkout main
+git fetch upstream
+git merge upstream/main
+git push origin main
+```
 
-### Contributor license agreement (CLA)
+Then merge the updated upstream snapshot into `amnezia`:
 
-All contributors **must** accept the CLA. The process is lightweight:
+```bash
+git checkout amnezia
+git merge main
+git push origin amnezia
+```
 
-1. Open your pull request.
-2. Paste the following comment (or reply `recheck` if you've signed before):
-
-   ```text
-   I have read the CLA Document and I hereby sign the CLA
-   ```
-
-3. The CLA-Assistant bot records your signature in the repo and marks the status check as passed.
-
-No special Git commands, email attachments, or commit footers required.
-
-### Security & responsible AI
-
-Have you discovered a vulnerability or have concerns about model output? Please e-mail **security@openai.com** and we will respond promptly.
+Resolve conflicts in `amnezia`. Do not put amcode feature work directly on
+`main`.
