@@ -16,6 +16,7 @@ use codex_protocol::openai_models::ModelsResponse;
 
 use crate::amazon_bedrock::AmazonBedrockModelProvider;
 use crate::auth::auth_manager_for_provider;
+use crate::auth::ensure_auth_manager_matches_provider;
 use crate::auth::resolve_provider_auth;
 use crate::models_endpoint::OpenAiModelsEndpoint;
 
@@ -82,6 +83,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
 
     /// Returns the auth provider used to attach request credentials.
     async fn api_auth(&self) -> codex_protocol::error::Result<SharedAuthProvider> {
+        ensure_auth_manager_matches_provider(self.auth_manager().as_deref(), self.info())?;
         let auth = self.auth().await;
         resolve_provider_auth(auth.as_ref(), self.info())
     }
@@ -497,6 +499,26 @@ mod tests {
                 .models
                 .iter()
                 .any(|model| model.slug == "provider-model")
+        );
+    }
+
+    #[tokio::test]
+    async fn amnezia_router_refuses_legacy_chatgpt_auth_manager() {
+        let provider = create_model_provider(
+            ModelProviderInfo::create_amnezia_router_provider(/*base_url*/ None),
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
+        );
+
+        let err = match provider.api_auth().await {
+            Ok(_) => panic!("router must reject legacy ChatGPT auth"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("requires configured OIDC auth"),
+            "unexpected error: {err}"
         );
     }
 }

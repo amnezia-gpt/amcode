@@ -1630,6 +1630,10 @@ impl AuthManager {
         self.external_auth().is_some()
     }
 
+    pub fn uses_configured_oidc_auth(&self) -> bool {
+        !self.auth_config.include_openai_chatgpt_params
+    }
+
     pub fn is_external_chatgpt_auth_active(&self) -> bool {
         self.auth_cached()
             .as_ref()
