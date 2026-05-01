@@ -7,14 +7,14 @@ rust_min_stack := "8388608" # 8 MiB
 help:
     just -l
 
-# `codex`
+# `amcode`
 alias c := codex
 codex *args:
-    cargo run --bin codex -- "$@"
+    cargo run --bin amcode -- "$@"
 
-# `codex exec`
+# `amcode exec`
 exec *args:
-    cargo run --bin codex -- exec "$@"
+    cargo run --bin amcode -- exec "$@"
 
 # Start `codex exec-server` and run codex-tui.
 [no-cd]
@@ -27,8 +27,8 @@ file-search *args:
 
 # Build the CLI and run the app-server test client
 app-server-test-client *args:
-    cargo build -p codex-cli
-    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/codex "$@"
+    cargo build -p codex-cli --bin amcode
+    cargo run -p codex-app-server-test-client -- --codex-bin ./target/debug/amcode "$@"
 
 # format code
 fmt:

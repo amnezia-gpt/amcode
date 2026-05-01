@@ -34,12 +34,27 @@ const MAX_REQUEST_MAX_RETRIES: u64 = 100;
 
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 pub const OPENAI_PROVIDER_ID: &str = "openai";
+const AMNEZIA_ROUTER_PROVIDER_NAME: &str = "Amnezia Router";
+pub const AMNEZIA_ROUTER_DEFAULT_BASE_URL: &str = "http://127.0.0.1:8001/v1";
+pub const AMNEZIA_ROUTER_API_KEY_PREFIX: &str = "agpt_pat_";
 const AMAZON_BEDROCK_PROVIDER_NAME: &str = "Amazon Bedrock";
 pub const AMAZON_BEDROCK_PROVIDER_ID: &str = "amazon-bedrock";
 pub const AMAZON_BEDROCK_DEFAULT_BASE_URL: &str = "https://bedrock-mantle.us-east-1.api.aws/v1";
 const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer supported.\nHow to fix: set `wire_api = \"responses\"` in your provider config.\nMore info: https://github.com/openai/codex/discussions/7782";
 pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
 pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
+
+/// First-party backend wired to the built-in `openai` provider id.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub enum FirstPartyBackend {
+    /// Upstream OpenAI / ChatGPT backend.
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// Amnezia Router backend used by amcode.
+    #[default]
+    #[serde(rename = "amnezia-router")]
+    AmneziaRouter,
+}
 
 /// Wire protocol that the provider speaks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
@@ -347,6 +362,42 @@ impl ModelProviderInfo {
         }
     }
 
+    pub fn create_amnezia_router_provider(base_url: Option<String>) -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: AMNEZIA_ROUTER_PROVIDER_NAME.into(),
+            base_url: Some(base_url.unwrap_or_else(|| AMNEZIA_ROUTER_DEFAULT_BASE_URL.into())),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            auth: None,
+            aws: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: Some(
+                [("version".to_string(), env!("CARGO_PKG_VERSION").to_string())]
+                    .into_iter()
+                    .collect(),
+            ),
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            websocket_connect_timeout_ms: None,
+            requires_openai_auth: true,
+            supports_websockets: false,
+        }
+    }
+
+    pub fn create_first_party_provider(
+        backend: FirstPartyBackend,
+        base_url: Option<String>,
+    ) -> ModelProviderInfo {
+        match backend {
+            FirstPartyBackend::OpenAi => Self::create_openai_provider(base_url),
+            FirstPartyBackend::AmneziaRouter => Self::create_amnezia_router_provider(base_url),
+        }
+    }
+
     pub fn create_amazon_bedrock_provider(
         aws: Option<ModelProviderAwsAuthInfo>,
     ) -> ModelProviderInfo {
@@ -378,6 +429,10 @@ impl ModelProviderInfo {
         self.name == OPENAI_PROVIDER_NAME
     }
 
+    pub fn is_amnezia_router(&self) -> bool {
+        self.name == AMNEZIA_ROUTER_PROVIDER_NAME
+    }
+
     pub fn is_amazon_bedrock(&self) -> bool {
         self.name == AMAZON_BEDROCK_PROVIDER_NAME
     }
@@ -401,8 +456,16 @@ pub const OLLAMA_OSS_PROVIDER_ID: &str = "ollama";
 pub fn built_in_model_providers(
     openai_base_url: Option<String>,
 ) -> HashMap<String, ModelProviderInfo> {
+    built_in_model_providers_for_backend(FirstPartyBackend::OpenAi, openai_base_url)
+}
+
+pub fn built_in_model_providers_for_backend(
+    first_party_backend: FirstPartyBackend,
+    first_party_base_url: Option<String>,
+) -> HashMap<String, ModelProviderInfo> {
     use ModelProviderInfo as P;
-    let openai_provider = P::create_openai_provider(openai_base_url);
+    let first_party_provider =
+        P::create_first_party_provider(first_party_backend, first_party_base_url);
     let amazon_bedrock_provider = P::create_amazon_bedrock_provider(/*aws*/ None);
 
     // We do not want to be in the business of adjucating which third-party
@@ -410,7 +473,7 @@ pub fn built_in_model_providers(
     // open source ("oss") providers by default. Users are encouraged to add to
     // `model_providers` in config.toml to add their own providers.
     [
-        (OPENAI_PROVIDER_ID, openai_provider),
+        (OPENAI_PROVIDER_ID, first_party_provider),
         (AMAZON_BEDROCK_PROVIDER_ID, amazon_bedrock_provider),
         (
             OLLAMA_OSS_PROVIDER_ID,

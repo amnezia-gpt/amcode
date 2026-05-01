@@ -140,6 +140,46 @@ fn test_supports_remote_compaction_for_openai() {
 }
 
 #[test]
+fn first_party_backend_defaults_to_amnezia_router() {
+    let providers = built_in_model_providers_for_backend(
+        FirstPartyBackend::AmneziaRouter,
+        /*first_party_base_url*/ None,
+    );
+
+    let provider = providers
+        .get(OPENAI_PROVIDER_ID)
+        .expect("first-party provider should be keyed by the existing provider id");
+
+    assert_eq!(provider.name, "Amnezia Router");
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some(AMNEZIA_ROUTER_DEFAULT_BASE_URL)
+    );
+    assert!(provider.requires_openai_auth);
+    assert!(!provider.supports_websockets);
+    assert!(provider.env_http_headers.is_none());
+}
+
+#[test]
+fn first_party_backend_can_build_legacy_openai() {
+    let providers = built_in_model_providers_for_backend(
+        FirstPartyBackend::OpenAi,
+        Some("https://api.openai.example/v1".to_string()),
+    );
+
+    let provider = providers
+        .get(OPENAI_PROVIDER_ID)
+        .expect("first-party provider should be keyed by the existing provider id");
+
+    assert!(provider.is_openai());
+    assert_eq!(
+        provider.base_url.as_deref(),
+        Some("https://api.openai.example/v1")
+    );
+    assert!(provider.env_http_headers.is_some());
+}
+
+#[test]
 fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),

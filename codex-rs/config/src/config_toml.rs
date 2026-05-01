@@ -32,6 +32,7 @@ use codex_app_server_protocol::Tools;
 use codex_app_server_protocol::UserSavedConfig;
 use codex_features::FeaturesToml;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
+use codex_model_provider_info::FirstPartyBackend;
 use codex_model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
@@ -283,6 +284,12 @@ pub struct ConfigToml {
 
     /// Base URL override for the built-in `openai` model provider.
     pub openai_base_url: Option<String>,
+
+    /// First-party backend wired to the built-in `openai` model provider id.
+    pub first_party_backend: Option<FirstPartyBackend>,
+
+    /// Base URL override for the Amnezia Router first-party backend.
+    pub amnezia_router_base_url: Option<String>,
 
     /// OIDC-compatible auth server configuration used by interactive login.
     pub auth: Option<AuthConfigToml>,

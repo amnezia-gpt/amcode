@@ -810,6 +810,25 @@
       },
       "type": "object"
     },
+    "FirstPartyBackend": {
+      "description": "First-party backend wired to the built-in `openai` provider id.",
+      "oneOf": [
+        {
+          "description": "Upstream OpenAI / ChatGPT backend.",
+          "enum": [
+            "openai"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Amnezia Router backend used by amcode.",
+          "enum": [
+            "amnezia-router"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ForcedLoginMethod": {
       "enum": [
         "chatgpt",
@@ -2466,6 +2485,10 @@
       "description": "Whether the model may request a login shell for shell-based tools. Default to `true`\n\nIf `true`, the model may request a login shell (`login = true`), and omitting `login` defaults to using a login shell. If `false`, the model can never use a login shell: `login = true` requests are rejected, and omitting `login` defaults to a non-login shell.",
       "type": "boolean"
     },
+    "amnezia_router_base_url": {
+      "description": "Base URL override for the Amnezia Router first-party backend.",
+      "type": "string"
+    },
     "analytics": {
       "allOf": [
         {
@@ -2865,6 +2888,14 @@
         }
       ],
       "description": "Optional URI-based file opener. If set, citations to files in the model output will be hyperlinked using the specified URI scheme."
+    },
+    "first_party_backend": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/FirstPartyBackend"
+        }
+      ],
+      "description": "First-party backend wired to the built-in `openai` model provider id."
     },
     "forced_chatgpt_workspace_id": {
       "default": null,

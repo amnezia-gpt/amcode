@@ -7,6 +7,7 @@ use codex_api::AuthProvider;
 use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_model_provider_info::AMNEZIA_ROUTER_API_KEY_PREFIX;
 use codex_model_provider_info::ModelProviderInfo;
 use http::HeaderMap;
 use http::HeaderValue;
@@ -79,6 +80,10 @@ pub(crate) fn resolve_provider_auth(
     auth: Option<&CodexAuth>,
     provider: &ModelProviderInfo,
 ) -> codex_protocol::error::Result<SharedAuthProvider> {
+    if provider.is_amnezia_router() {
+        return amnezia_router_auth(auth);
+    }
+
     if let Some(auth) = bearer_auth_for_provider(provider)? {
         return Ok(Arc::new(auth));
     }
@@ -87,6 +92,39 @@ pub(crate) fn resolve_provider_auth(
         Some(auth) => auth_provider_from_auth(auth),
         None => unauthenticated_auth_provider(),
     })
+}
+
+fn amnezia_router_auth(
+    auth: Option<&CodexAuth>,
+) -> codex_protocol::error::Result<SharedAuthProvider> {
+    let Some(auth) = auth else {
+        return Ok(unauthenticated_auth_provider());
+    };
+    let token = auth.get_token().map_err(|err| {
+        codex_protocol::error::CodexErr::InvalidRequest(format!(
+            "Amnezia Router auth token is unavailable: {err}"
+        ))
+    })?;
+    if !token.starts_with(AMNEZIA_ROUTER_API_KEY_PREFIX) {
+        return Err(codex_protocol::error::CodexErr::InvalidRequest(
+            "Amnezia Router refuses non-router credentials; run configured OIDC login to exchange credentials for an agpt_pat_ router key.".to_string(),
+        ));
+    }
+    Ok(Arc::new(BearerAuthProvider::new(token)))
+}
+
+pub(crate) fn ensure_auth_manager_matches_provider(
+    auth_manager: Option<&AuthManager>,
+    provider: &ModelProviderInfo,
+) -> codex_protocol::error::Result<()> {
+    if provider.is_amnezia_router()
+        && !auth_manager.is_some_and(AuthManager::uses_configured_oidc_auth)
+    {
+        return Err(codex_protocol::error::CodexErr::InvalidRequest(
+            "Amnezia Router backend requires configured OIDC auth; refusing to send legacy OpenAI/ChatGPT credentials to the router.".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn bearer_auth_for_provider(
@@ -121,6 +159,7 @@ pub fn auth_provider_from_auth(auth: &CodexAuth) -> SharedAuthProvider {
 
 #[cfg(test)]
 mod tests {
+    use codex_model_provider_info::AMNEZIA_ROUTER_API_KEY_PREFIX;
     use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
 
@@ -133,5 +172,38 @@ mod tests {
         let auth = resolve_provider_auth(/*auth*/ None, &provider).expect("auth should resolve");
 
         assert!(auth.to_auth_headers().is_empty());
+    }
+
+    #[test]
+    fn amnezia_router_rejects_non_router_bearer_token() {
+        let provider = ModelProviderInfo::create_amnezia_router_provider(/*base_url*/ None);
+        let auth = CodexAuth::from_api_key("sk-openai");
+
+        let err = match resolve_provider_auth(Some(&auth), &provider) {
+            Ok(_) => panic!("router should reject non-router credentials"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("non-router credentials"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn amnezia_router_accepts_router_bearer_token() {
+        let provider = ModelProviderInfo::create_amnezia_router_provider(/*base_url*/ None);
+        let auth = CodexAuth::from_api_key(&format!("{AMNEZIA_ROUTER_API_KEY_PREFIX}test"));
+
+        let auth_provider =
+            resolve_provider_auth(Some(&auth), &provider).expect("router key should resolve");
+
+        let headers = auth_provider.to_auth_headers();
+        assert_eq!(
+            headers
+                .get(http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer agpt_pat_test")
+        );
     }
 }
