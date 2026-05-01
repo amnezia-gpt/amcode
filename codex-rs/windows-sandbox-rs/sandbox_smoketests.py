@@ -39,14 +39,14 @@ def _resolve_codex_cmd() -> List[str]:
         if candidate.exists():
             return [str(candidate)]
 
-    if shutil.which("codex"):
-        return ["codex"]
+    if shutil.which("amcode"):
+        return ["amcode"]
 
     raise FileNotFoundError(
         "Codex CLI not found. Build it first, e.g.\n"
-        "  cargo build -p codex-cli --release\n"
+        "  cargo build -p codex-cli --bin amcode --release\n"
         "or for debug:\n"
-        "  cargo build -p codex-cli\n"
+        "  cargo build -p codex-cli --bin amcode\n"
     )
 
 CODEX_CMD = _resolve_codex_cmd()
