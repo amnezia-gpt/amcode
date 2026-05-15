@@ -6,8 +6,10 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthDotJson;
 use codex_login::AuthManager;
 use codex_login::CLIENT_ID;
+use codex_login::LoginAuthConfig;
 use codex_login::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_login::logout_with_revoke;
+use codex_login::logout_with_revoke_with_auth_config;
 use codex_login::save_auth;
 use codex_login::token_data::IdTokenInfo;
 use codex_login::token_data::TokenData;
@@ -70,6 +72,69 @@ async fn logout_with_revoke_revokes_refresh_token_then_removes_auth() -> Result<
             "token": REFRESH_TOKEN,
             "token_type_hint": "refresh_token",
             "client_id": CLIENT_ID,
+        })
+    );
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(logout_revoke)]
+#[tokio::test]
+async fn logout_with_revoke_uses_configured_oidc_revocation_endpoint_and_client_id() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "message": "success"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    save_auth(
+        codex_home.path(),
+        &chatgpt_auth(),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let auth_config = LoginAuthConfig {
+        issuer: server.uri(),
+        client_id: "router-ui-public".to_string(),
+        scopes: vec!["openid".to_string(), "offline_access".to_string()],
+        authorization_endpoint: Some(format!("{}/oauth/authorize", server.uri())),
+        token_endpoint: Some(format!("{}/oauth/token", server.uri())),
+        revocation_endpoint: Some(format!("{}/oauth/revoke", server.uri())),
+        requested_token_type: Some("urn:amnezia-gpt:token-type:api_key".to_string()),
+        router_audience: Some("urn:amnezia-gpt:resource:router".to_string()),
+        include_openai_chatgpt_params: false,
+    };
+
+    let removed = logout_with_revoke_with_auth_config(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        auth_config,
+    )
+    .await?;
+
+    assert!(removed);
+    assert!(!codex_home.path().join("auth.json").exists());
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("failed to fetch revoke requests")?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .body_json::<Value>()
+            .context("revoke request should be JSON")?,
+        json!({
+            "token": REFRESH_TOKEN,
+            "token_type_hint": "refresh_token",
+            "client_id": "router-ui-public",
         })
     );
     server.verify().await;

@@ -519,11 +519,25 @@ pub async fn logout_with_revoke(
     codex_home: &Path,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> std::io::Result<bool> {
-    AuthManager::new(
+    logout_with_revoke_with_auth_config(
+        codex_home,
+        auth_credentials_store_mode,
+        LoginAuthConfig::default(),
+    )
+    .await
+}
+
+pub async fn logout_with_revoke_with_auth_config(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+    auth_config: LoginAuthConfig,
+) -> std::io::Result<bool> {
+    AuthManager::new_with_auth_config(
         codex_home.to_path_buf(),
         /*enable_codex_api_key_env*/ false,
         auth_credentials_store_mode,
         /*chatgpt_base_url*/ None,
+        auth_config,
     )
     .await
     .logout_with_revoke()
@@ -1840,7 +1854,7 @@ impl AuthManager {
         let auth_dot_json = self
             .auth_cached()
             .and_then(|auth| auth.get_current_auth_json());
-        if let Err(err) = revoke_auth_tokens(auth_dot_json.as_ref()).await {
+        if let Err(err) = revoke_auth_tokens(auth_dot_json.as_ref(), &self.auth_config).await {
             tracing::warn!("failed to revoke auth tokens during logout: {err}");
         }
         let result = logout_all_stores(&self.codex_home, self.auth_credentials_store_mode)?;

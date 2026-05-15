@@ -44,6 +44,7 @@ pub use auth::login_with_agent_identity;
 pub use auth::login_with_api_key;
 pub use auth::logout;
 pub use auth::logout_with_revoke;
+pub use auth::logout_with_revoke_with_auth_config;
 pub use auth::read_codex_agent_identity_from_env;
 pub use auth::read_openai_api_key_from_env;
 pub use auth::save_auth;

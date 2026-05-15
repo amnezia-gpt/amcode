@@ -17,6 +17,7 @@ use super::manager::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
 use super::storage::AuthDotJson;
 use super::util::try_parse_error_message;
 use crate::default_client::create_client;
+use crate::server::LoginAuthConfig;
 use crate::token_data::TokenData;
 
 const REVOKE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -34,13 +35,6 @@ impl RevokeTokenKind {
             Self::Refresh => "refresh_token",
         }
     }
-
-    fn client_id(self) -> Option<&'static str> {
-        match self {
-            Self::Access => None,
-            Self::Refresh => Some(CLIENT_ID),
-        }
-    }
 }
 
 #[derive(Serialize)]
@@ -48,24 +42,26 @@ struct RevokeTokenRequest<'a> {
     token: &'a str,
     token_type_hint: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    client_id: Option<&'static str>,
+    client_id: Option<&'a str>,
 }
 
 pub(super) async fn revoke_auth_tokens(
     auth_dot_json: Option<&AuthDotJson>,
+    auth_config: &LoginAuthConfig,
 ) -> Result<(), std::io::Error> {
     let Some(tokens) = auth_dot_json.and_then(managed_chatgpt_tokens) else {
         return Ok(());
     };
 
     let client = create_client();
-    let endpoint = revoke_token_endpoint();
+    let endpoint = revoke_token_endpoint(auth_config);
     if !tokens.refresh_token.is_empty() {
         revoke_oauth_token(
             &client,
             endpoint.as_str(),
             tokens.refresh_token.as_str(),
             RevokeTokenKind::Refresh,
+            refresh_revoke_client_id(auth_config),
             REVOKE_HTTP_TIMEOUT,
         )
         .await
@@ -75,6 +71,7 @@ pub(super) async fn revoke_auth_tokens(
             endpoint.as_str(),
             tokens.access_token.as_str(),
             RevokeTokenKind::Access,
+            None,
             REVOKE_HTTP_TIMEOUT,
         )
         .await
@@ -106,12 +103,13 @@ async fn revoke_oauth_token(
     endpoint: &str,
     token: &str,
     kind: RevokeTokenKind,
+    client_id: Option<&str>,
     timeout: Duration,
 ) -> Result<(), std::io::Error> {
     let request = RevokeTokenRequest {
         token,
         token_type_hint: kind.as_str(),
-        client_id: kind.client_id(),
+        client_id,
     };
 
     let response = client
@@ -138,7 +136,11 @@ async fn revoke_oauth_token(
     )))
 }
 
-fn revoke_token_endpoint() -> String {
+fn revoke_token_endpoint(auth_config: &LoginAuthConfig) -> String {
+    if !auth_config.include_openai_chatgpt_params {
+        return auth_config.revocation_endpoint();
+    }
+
     if let Ok(endpoint) = std::env::var(REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR) {
         return endpoint;
     }
@@ -150,6 +152,14 @@ fn revoke_token_endpoint() -> String {
     }
 
     REVOKE_TOKEN_URL.to_string()
+}
+
+fn refresh_revoke_client_id(auth_config: &LoginAuthConfig) -> Option<&str> {
+    if auth_config.include_openai_chatgpt_params {
+        Some(CLIENT_ID)
+    } else {
+        Some(auth_config.client_id.as_str())
+    }
 }
 
 fn derive_revoke_token_endpoint(refresh_endpoint: &str) -> Option<String> {
@@ -195,6 +205,7 @@ mod tests {
             endpoint.as_str(),
             "refresh-token",
             RevokeTokenKind::Refresh,
+            Some(CLIENT_ID),
             Duration::from_millis(20),
         )
         .await
