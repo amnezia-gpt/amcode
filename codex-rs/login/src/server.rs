@@ -165,6 +165,12 @@ impl LoginAuthConfig {
             .unwrap_or_else(|| format!("{}/oauth/token", self.issuer.trim_end_matches('/')))
     }
 
+    pub(crate) fn revocation_endpoint(&self) -> String {
+        self.revocation_endpoint
+            .clone()
+            .unwrap_or_else(|| format!("{}/oauth/revoke", self.issuer.trim_end_matches('/')))
+    }
+
     fn requested_token_type(&self) -> Option<&str> {
         self.requested_token_type.as_deref()
     }
@@ -567,6 +573,7 @@ async fn process_request(
                     let success_url = compose_success_url(
                         actual_port,
                         &opts.issuer,
+                        opts.auth_config.include_openai_chatgpt_params,
                         &tokens.id_token,
                         &tokens.access_token,
                     );
@@ -984,7 +991,13 @@ pub(crate) async fn persist_tokens_async(
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
 }
 
-fn compose_success_url(port: u16, issuer: &str, id_token: &str, access_token: &str) -> String {
+fn compose_success_url(
+    port: u16,
+    issuer: &str,
+    include_openai_chatgpt_params: bool,
+    id_token: &str,
+    access_token: &str,
+) -> String {
     let token_claims = jwt_auth_claims(id_token);
     let access_claims = jwt_auth_claims(access_token);
 
@@ -1012,8 +1025,10 @@ fn compose_success_url(port: u16, issuer: &str, id_token: &str, access_token: &s
 
     let platform_url = if issuer == DEFAULT_ISSUER {
         "https://platform.openai.com"
-    } else {
+    } else if include_openai_chatgpt_params {
         "https://platform.api.openai.org"
+    } else {
+        issuer.trim_end_matches('/')
     };
 
     let mut params = vec![
@@ -1286,6 +1301,7 @@ mod tests {
     use super::LoginAuthConfig;
     use super::TokenEndpointErrorDetail;
     use super::build_authorize_url;
+    use super::compose_success_url;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::parse_token_endpoint_error;
@@ -1364,6 +1380,22 @@ mod tests {
         assert!(body.contains("requested_token_type=urn%3Aamnezia-gpt%3Atoken-type%3Aapi_key"));
         assert!(body.contains("audience=urn%3Aamnezia-gpt%3Aresource%3Arouter"));
         assert!(!body.contains("requested_token=openai-api-key"));
+    }
+
+    #[test]
+    fn configured_oidc_success_url_uses_issuer_as_platform_url() {
+        let url = compose_success_url(
+            /*port*/ 1455,
+            "https://auth.example.com/",
+            /*include_openai_chatgpt_params*/ false,
+            "header.payload.signature",
+            "access.header.payload",
+        );
+
+        assert!(url.starts_with("http://localhost:1455/success?"));
+        assert!(url.contains("id_token=header.payload.signature"));
+        assert!(url.contains("platform_url=https%3A%2F%2Fauth.example.com"));
+        assert!(!url.contains("platform.api.openai.org"));
     }
 
     #[test]

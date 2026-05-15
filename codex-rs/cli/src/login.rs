@@ -15,7 +15,7 @@ use codex_login::LoginAuthConfig;
 use codex_login::ServerOptions;
 use codex_login::login_with_agent_identity;
 use codex_login::login_with_api_key;
-use codex_login::logout_with_revoke;
+use codex_login::logout_with_revoke_with_auth_config;
 use codex_login::resolve_oidc_login_config;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
@@ -415,8 +415,16 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+    let auth_config =
+        resolve_oidc_login_config(LoginAuthConfig::from_config_toml(config.auth.clone())).await;
 
-    match logout_with_revoke(&config.codex_home, config.cli_auth_credentials_store_mode).await {
+    match logout_with_revoke_with_auth_config(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        auth_config,
+    )
+    .await
+    {
         Ok(true) => {
             eprintln!("Successfully logged out");
             std::process::exit(0);
