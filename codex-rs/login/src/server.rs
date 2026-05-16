@@ -972,12 +972,7 @@ pub(crate) async fn persist_tokens_async(
             refresh_token,
             account_id: None,
         };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
-        }
+        tokens.account_id = tokens.id_token.chatgpt_account_id.clone();
         let auth = AuthDotJson {
             auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: api_key,
@@ -1018,10 +1013,8 @@ fn compose_success_url(
         .and_then(JsonValue::as_bool)
         .unwrap_or(false);
     let needs_setup = (!completed_onboarding) && is_org_owner;
-    let plan_type = access_claims
-        .get("chatgpt_plan_type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let plan_type =
+        auth_claim_str(&access_claims, "amnezia_plan_type", "chatgpt_plan_type").unwrap_or("");
 
     let platform_url = if issuer == DEFAULT_ISSUER {
         "https://platform.openai.com"
@@ -1060,12 +1053,18 @@ fn jwt_auth_claims(jwt: &str) -> serde_json::Map<String, serde_json::Value> {
         Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(mut v) => {
                 if let Some(obj) = v
+                    .get_mut("https://gpt.amnezia.org/auth")
+                    .and_then(|x| x.as_object_mut())
+                {
+                    return obj.clone();
+                }
+                if let Some(obj) = v
                     .get_mut("https://api.openai.com/auth")
                     .and_then(|x| x.as_object_mut())
                 {
                     return obj.clone();
                 }
-                eprintln!("JWT payload missing expected 'https://api.openai.com/auth' object");
+                eprintln!("JWT payload missing expected auth claims object");
             }
             Err(e) => {
                 eprintln!("Failed to parse JWT JSON payload: {e}");
@@ -1078,6 +1077,17 @@ fn jwt_auth_claims(jwt: &str) -> serde_json::Map<String, serde_json::Value> {
     serde_json::Map::new()
 }
 
+fn auth_claim_str<'a>(
+    claims: &'a serde_json::Map<String, serde_json::Value>,
+    amnezia_key: &str,
+    legacy_key: &str,
+) -> Option<&'a str> {
+    claims
+        .get(amnezia_key)
+        .or_else(|| claims.get(legacy_key))
+        .and_then(JsonValue::as_str)
+}
+
 /// Validates the ID token against an optional workspace restriction.
 pub(crate) fn ensure_workspace_allowed(
     expected: Option<&str>,
@@ -1087,9 +1097,9 @@ pub(crate) fn ensure_workspace_allowed(
         return Ok(());
     };
 
-    let claims = jwt_auth_claims(id_token);
-    let Some(actual) = claims.get("chatgpt_account_id").and_then(JsonValue::as_str) else {
-        return Err("Login is restricted to a specific workspace, but the token did not include an chatgpt_account_id claim.".to_string());
+    let token_info = parse_chatgpt_jwt_claims(id_token).map_err(|error| error.to_string())?;
+    let Some(actual) = token_info.chatgpt_account_id.as_deref() else {
+        return Err("Login is restricted to a specific workspace, but the token did not include an account id claim.".to_string());
     };
 
     if actual == expected {
@@ -1296,12 +1306,15 @@ pub(crate) async fn obtain_api_key(
 }
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use pretty_assertions::assert_eq;
+    use serde::Serialize;
 
     use super::LoginAuthConfig;
     use super::TokenEndpointErrorDetail;
     use super::build_authorize_url;
     use super::compose_success_url;
+    use super::ensure_workspace_allowed;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::parse_token_endpoint_error;
@@ -1310,6 +1323,27 @@ mod tests {
     use super::render_login_error_page;
     use super::sanitize_url_for_logging;
     use crate::pkce::PkceCodes;
+
+    fn fake_jwt(payload: serde_json::Value) -> String {
+        #[derive(Serialize)]
+        struct Header {
+            alg: &'static str,
+            typ: &'static str,
+        }
+        let header = Header {
+            alg: "none",
+            typ: "JWT",
+        };
+
+        fn b64url_no_pad(bytes: &[u8]) -> String {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+        }
+
+        let header_b64 = b64url_no_pad(&serde_json::to_vec(&header).unwrap());
+        let payload_b64 = b64url_no_pad(&serde_json::to_vec(&payload).unwrap());
+        let signature_b64 = b64url_no_pad(b"sig");
+        format!("{header_b64}.{payload_b64}.{signature_b64}")
+    }
 
     #[test]
     fn configured_oidc_auth_url_omits_openai_specific_params() {
@@ -1396,6 +1430,34 @@ mod tests {
         assert!(url.contains("id_token=header.payload.signature"));
         assert!(url.contains("platform_url=https%3A%2F%2Fauth.example.com"));
         assert!(!url.contains("platform.api.openai.org"));
+    }
+
+    #[test]
+    fn workspace_validation_accepts_amnezia_account_claim() {
+        let id_token = fake_jwt(serde_json::json!({
+            "https://gpt.amnezia.org/auth": {
+                "amnezia_account_id": "account-123"
+            }
+        }));
+
+        assert_eq!(
+            ensure_workspace_allowed(Some("account-123"), &id_token),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn workspace_validation_keeps_legacy_account_claim_fallback() {
+        let id_token = fake_jwt(serde_json::json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "account-123"
+            }
+        }));
+
+        assert_eq!(
+            ensure_workspace_allowed(Some("account-123"), &id_token),
+            Ok(())
+        );
     }
 
     #[test]

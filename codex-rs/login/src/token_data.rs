@@ -74,6 +74,8 @@ struct IdClaims {
     email: Option<String>,
     #[serde(rename = "https://api.openai.com/profile", default)]
     profile: Option<ProfileClaims>,
+    #[serde(rename = "https://gpt.amnezia.org/auth", default)]
+    amnezia_auth: Option<AmneziaAuthClaims>,
     #[serde(rename = "https://api.openai.com/auth", default)]
     auth: Option<AuthClaims>,
 }
@@ -96,6 +98,16 @@ struct AuthClaims {
     chatgpt_account_id: Option<String>,
     #[serde(default)]
     chatgpt_account_is_fedramp: bool,
+}
+
+#[derive(Deserialize)]
+struct AmneziaAuthClaims {
+    #[serde(default)]
+    amnezia_plan_type: Option<PlanType>,
+    #[serde(default)]
+    amnezia_user_id: Option<String>,
+    #[serde(default)]
+    amnezia_account_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +151,17 @@ pub fn parse_chatgpt_jwt_claims(jwt: &str) -> Result<IdTokenInfo, IdTokenInfoErr
     let email = claims
         .email
         .or_else(|| claims.profile.and_then(|profile| profile.email));
+
+    if let Some(auth) = claims.amnezia_auth {
+        return Ok(IdTokenInfo {
+            email,
+            raw_jwt: jwt.to_string(),
+            chatgpt_plan_type: auth.amnezia_plan_type,
+            chatgpt_user_id: auth.amnezia_user_id,
+            chatgpt_account_id: auth.amnezia_account_id,
+            chatgpt_account_is_fedramp: false,
+        });
+    }
 
     match claims.auth {
         Some(auth) => Ok(IdTokenInfo {

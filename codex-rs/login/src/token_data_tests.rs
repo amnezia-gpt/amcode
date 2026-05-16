@@ -30,14 +30,60 @@ fn fake_jwt(payload: serde_json::Value) -> String {
 fn id_token_info_parses_email_and_plan() {
     let fake_jwt = fake_jwt(serde_json::json!({
         "email": "user@example.com",
-        "https://api.openai.com/auth": {
-            "chatgpt_plan_type": "pro"
+        "https://gpt.amnezia.org/auth": {
+            "amnezia_plan_type": "pro",
+            "amnezia_account_id": "account-123",
+            "amnezia_user_id": "user-123"
         }
     }));
 
     let info = parse_chatgpt_jwt_claims(&fake_jwt).expect("should parse");
     assert_eq!(info.email.as_deref(), Some("user@example.com"));
     assert_eq!(info.get_chatgpt_plan_type().as_deref(), Some("Pro"));
+    assert_eq!(info.chatgpt_account_id.as_deref(), Some("account-123"));
+    assert_eq!(info.chatgpt_user_id.as_deref(), Some("user-123"));
+}
+
+#[test]
+fn id_token_info_prefers_amnezia_claims_over_legacy_openai_claims() {
+    let fake_jwt = fake_jwt(serde_json::json!({
+        "email": "user@example.com",
+        "https://gpt.amnezia.org/auth": {
+            "amnezia_plan_type": "business",
+            "amnezia_account_id": "amnezia-account",
+            "amnezia_user_id": "amnezia-user"
+        },
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "free",
+            "chatgpt_account_id": "legacy-account",
+            "chatgpt_user_id": "legacy-user"
+        }
+    }));
+
+    let info = parse_chatgpt_jwt_claims(&fake_jwt).expect("should parse");
+    assert_eq!(
+        info.get_chatgpt_plan_type_raw().as_deref(),
+        Some("business")
+    );
+    assert_eq!(info.chatgpt_account_id.as_deref(), Some("amnezia-account"));
+    assert_eq!(info.chatgpt_user_id.as_deref(), Some("amnezia-user"));
+}
+
+#[test]
+fn id_token_info_keeps_legacy_openai_claims_as_fallback() {
+    let fake_jwt = fake_jwt(serde_json::json!({
+        "email": "user@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": "legacy-account",
+            "chatgpt_user_id": "legacy-user"
+        }
+    }));
+
+    let info = parse_chatgpt_jwt_claims(&fake_jwt).expect("should parse");
+    assert_eq!(info.get_chatgpt_plan_type_raw().as_deref(), Some("pro"));
+    assert_eq!(info.chatgpt_account_id.as_deref(), Some("legacy-account"));
+    assert_eq!(info.chatgpt_user_id.as_deref(), Some("legacy-user"));
 }
 
 #[test]

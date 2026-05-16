@@ -101,6 +101,7 @@ pub(crate) enum SignInOption {
 }
 
 const API_KEY_DISABLED_MESSAGE: &str = "API key login is disabled.";
+const AUTH_PROVIDER_NAME: &str = "Amnezia";
 fn onboarding_request_id() -> codex_app_server_protocol::RequestId {
     codex_app_server_protocol::RequestId::String(Uuid::new_v4().to_string())
 }
@@ -236,6 +237,7 @@ pub(crate) struct AuthModeWidget {
     pub login_status: LoginStatus,
     pub app_server_request_handle: AppServerRequestHandle,
     pub forced_login_method: Option<ForcedLoginMethod>,
+    pub custom_oidc_device_code_enabled: bool,
     pub animations_enabled: bool,
     pub animations_suppressed: Cell<bool>,
 }
@@ -294,9 +296,13 @@ impl AuthModeWidget {
         !matches!(self.forced_login_method, Some(ForcedLoginMethod::Api))
     }
 
+    fn is_device_code_login_allowed(&self) -> bool {
+        self.is_chatgpt_login_allowed() && self.custom_oidc_device_code_enabled
+    }
+
     fn displayed_sign_in_options(&self) -> Vec<SignInOption> {
         let mut options = vec![SignInOption::ChatGpt];
-        if self.is_chatgpt_login_allowed() {
+        if self.is_device_code_login_allowed() {
             options.push(SignInOption::DeviceCode);
         }
         if self.is_api_login_allowed() {
@@ -309,6 +315,8 @@ impl AuthModeWidget {
         let mut options = Vec::new();
         if self.is_chatgpt_login_allowed() {
             options.push(SignInOption::ChatGpt);
+        }
+        if self.is_device_code_login_allowed() {
             options.push(SignInOption::DeviceCode);
         }
         if self.is_api_login_allowed() {
@@ -347,7 +355,7 @@ impl AuthModeWidget {
                 }
             }
             SignInOption::DeviceCode => {
-                if self.is_chatgpt_login_allowed() {
+                if self.is_device_code_login_allowed() {
                     self.start_device_code_login();
                 }
             }
@@ -372,7 +380,10 @@ impl AuthModeWidget {
         let mut lines: Vec<Line> = vec![
             Line::from(vec![
                 "  ".into(),
-                "Sign in with ChatGPT to use Codex as part of your paid plan".into(),
+                format!(
+                    "Sign in with {AUTH_PROVIDER_NAME} to use Amcode as part of your paid plan"
+                )
+                .into(),
             ]),
             Line::from(vec![
                 "  ".into(),
@@ -410,8 +421,8 @@ impl AuthModeWidget {
             vec![line1, line2]
         };
 
-        let chatgpt_description = if !self.is_chatgpt_login_allowed() {
-            "ChatGPT login is disabled"
+        let auth_description = if !self.is_chatgpt_login_allowed() {
+            "Amnezia login is disabled"
         } else {
             "Usage included with Plus, Pro, Business, and Enterprise plans"
         };
@@ -423,8 +434,8 @@ impl AuthModeWidget {
                     lines.extend(create_mode_item(
                         idx,
                         option,
-                        "Sign in with ChatGPT",
-                        chatgpt_description,
+                        &format!("Sign in with {AUTH_PROVIDER_NAME}"),
+                        auth_description,
                     ));
                 }
                 SignInOption::DeviceCode => {
@@ -449,9 +460,11 @@ impl AuthModeWidget {
 
         if !self.is_api_login_allowed() {
             lines.push(
-                "  API key login is disabled by this workspace. Sign in with ChatGPT to continue."
-                    .dim()
-                    .into(),
+                format!(
+                    "  API key login is disabled by this workspace. Sign in with {AUTH_PROVIDER_NAME} to continue."
+                )
+                .dim()
+                .into(),
             );
             lines.push("".into());
         }
@@ -493,12 +506,14 @@ impl AuthModeWidget {
                 state.auth_url.as_str().cyan().underlined(),
             ]));
             lines.push("".into());
-            lines.push(Line::from(vec![
-                "  On a remote or headless machine? Press Esc and choose ".into(),
-                "Sign in with Device Code".cyan(),
-                ".".into(),
-            ]));
-            lines.push("".into());
+            if self.is_device_code_login_allowed() {
+                lines.push(Line::from(vec![
+                    "  On a remote or headless machine? Press Esc and choose ".into(),
+                    "Sign in with Device Code".cyan(),
+                    ".".into(),
+                ]));
+                lines.push("".into());
+            }
             Some(state.auth_url.clone())
         } else {
             None
@@ -518,26 +533,21 @@ impl AuthModeWidget {
 
     fn render_chatgpt_success_message(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ Signed in with your ChatGPT account".fg(Color::Green).into(),
+            format!("✓ Signed in with your {AUTH_PROVIDER_NAME} account")
+                .fg(Color::Green)
+                .into(),
             "".into(),
             "  Before you start:".into(),
             "".into(),
-            "  Decide how much autonomy you want to grant Codex".into(),
-            Line::from(vec![
-                "  For more details see the ".into(),
-                "\u{1b}]8;;https://developers.openai.com/codex/security\u{7}Codex docs\u{1b}]8;;\u{7}".underlined(),
-            ])
-            .dim(),
+            "  Decide how much autonomy you want to grant Amcode".into(),
             "".into(),
-            "  Codex can make mistakes".into(),
-            "  Review the code it writes and commands it runs".dim().into(),
+            "  Amcode can make mistakes".into(),
+            "  Review the code it writes and commands it runs"
+                .dim()
+                .into(),
             "".into(),
-            "  Powered by your ChatGPT account".into(),
-            Line::from(vec![
-                "  Uses your plan's rate limits and ".into(),
-                "\u{1b}]8;;https://chatgpt.com/#settings\u{7}training data preferences\u{1b}]8;;\u{7}".underlined(),
-            ])
-            .dim(),
+            format!("  Powered by your {AUTH_PROVIDER_NAME} account").into(),
+            "  Uses your plan's rate limits".dim().into(),
             "".into(),
             "  Press Enter to continue".fg(Color::Cyan).into(),
         ];
@@ -549,7 +559,7 @@ impl AuthModeWidget {
 
     fn render_chatgpt_success(&self, area: Rect, buf: &mut Buffer) {
         let lines = vec![
-            "✓ Signed in with your ChatGPT account"
+            format!("✓ Signed in with your {AUTH_PROVIDER_NAME} account")
                 .fg(Color::Green)
                 .into(),
         ];
@@ -582,7 +592,7 @@ impl AuthModeWidget {
         let mut intro_lines: Vec<Line> = vec![
             Line::from(vec![
                 "> ".into(),
-                "Use your own OpenAI API key for usage-based billing".bold(),
+                "Use your own API key for usage-based billing".bold(),
             ]),
             "".into(),
             "  Paste or type your API key below. It will be stored locally in auth.json.".into(),
@@ -806,10 +816,9 @@ impl AuthModeWidget {
         }
     }
 
-    /// Kicks off the ChatGPT auth flow and keeps the UI state consistent with the attempt.
+    /// Kicks off the managed auth flow and keeps the UI state consistent with the attempt.
     fn start_chatgpt_login(&mut self) {
-        // If we're already authenticated with ChatGPT, don't start a new login –
-        // just proceed to the success message flow.
+        // If we're already authenticated with managed auth, proceed to the success message flow.
         if self.handle_existing_chatgpt_login() {
             return;
         }
@@ -852,6 +861,9 @@ impl AuthModeWidget {
     }
 
     fn start_device_code_login(&mut self) {
+        if !self.is_device_code_login_allowed() {
+            return;
+        }
         if self.handle_existing_chatgpt_login() {
             return;
         }
@@ -1012,6 +1024,7 @@ mod tests {
             login_status: LoginStatus::NotAuthenticated,
             app_server_request_handle: AppServerRequestHandle::InProcess(client.request_handle()),
             forced_login_method: Some(ForcedLoginMethod::Chatgpt),
+            custom_oidc_device_code_enabled: false,
             animations_enabled: true,
             animations_suppressed: std::cell::Cell::new(false),
         };
@@ -1032,6 +1045,36 @@ mod tests {
             &*widget.sign_in_state.read().unwrap(),
             SignInState::PickMode
         ));
+    }
+
+    #[tokio::test]
+    async fn device_code_is_hidden_by_default() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.custom_oidc_device_code_enabled = false;
+
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![SignInOption::ChatGpt]
+        );
+        assert_eq!(
+            widget.selectable_sign_in_options(),
+            vec![SignInOption::ChatGpt]
+        );
+    }
+
+    #[tokio::test]
+    async fn device_code_is_shown_when_enabled() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.custom_oidc_device_code_enabled = true;
+
+        assert_eq!(
+            widget.displayed_sign_in_options(),
+            vec![SignInOption::ChatGpt, SignInOption::DeviceCode]
+        );
+        assert_eq!(
+            widget.selectable_sign_in_options(),
+            vec![SignInOption::ChatGpt, SignInOption::DeviceCode]
+        );
     }
 
     #[tokio::test]

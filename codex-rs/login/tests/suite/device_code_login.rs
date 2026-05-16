@@ -133,7 +133,7 @@ async fn device_code_login_is_disabled_for_configured_oidc_auth() -> anyhow::Res
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     assert!(
         err.to_string()
-            .contains("Use browser login for configured OIDC auth")
+            .contains("device code login is not enabled for this auth server")
     );
     Ok(())
 }
