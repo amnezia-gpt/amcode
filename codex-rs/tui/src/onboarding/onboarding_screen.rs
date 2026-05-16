@@ -5,6 +5,7 @@ use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_protocol::ServerNotification;
 use codex_exec_server::LOCAL_FS;
+use codex_features::Feature;
 use codex_git_utils::resolve_root_git_project_for_trust;
 #[cfg(target_os = "windows")]
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -90,6 +91,8 @@ impl OnboardingScreen {
         let cwd = config.cwd.to_path_buf();
         let codex_home = config.codex_home.to_path_buf();
         let forced_login_method = config.forced_login_method;
+        let custom_oidc_device_code_enabled =
+            config.features.enabled(Feature::CustomOidcDeviceCodeAuth);
         let mut steps: Vec<Step> = Vec::new();
         steps.push(Step::Welcome(WelcomeWidget::new(
             !matches!(login_status, LoginStatus::NotAuthenticated),
@@ -110,6 +113,7 @@ impl OnboardingScreen {
                     login_status,
                     app_server_request_handle,
                     forced_login_method,
+                    custom_oidc_device_code_enabled,
                     animations_enabled: config.animations,
                     animations_suppressed: std::cell::Cell::new(false),
                 }));
@@ -459,7 +463,7 @@ pub(crate) async fn run_onboarding_app(
     use tokio_stream::StreamExt;
 
     let mut onboarding_screen = OnboardingScreen::new(tui, args).await;
-    // One-time guard to fully clear the screen after ChatGPT login success message is shown
+    // One-time guard to fully clear the screen after managed login success message is shown.
     let mut did_full_clear_after_success = false;
 
     tui.draw(u16::MAX, |frame| {

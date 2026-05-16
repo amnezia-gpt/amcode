@@ -220,6 +220,8 @@ pub enum Feature {
     ResponsesWebsocketsV2,
     /// Enable workspace dependency support.
     WorkspaceDependencies,
+    /// Allow the TUI to show device-code login.
+    CustomOidcDeviceCodeAuth,
 }
 
 impl Feature {
@@ -1047,6 +1049,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "workspace_dependencies",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::CustomOidcDeviceCodeAuth,
+        key: "custom_oidc_device_code_auth",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
 ];
 

@@ -148,8 +148,8 @@ async fn poll_for_token(
 fn print_device_code_prompt(verification_url: &str, code: &str) {
     let version = env!("CARGO_PKG_VERSION");
     println!(
-        "\nWelcome to Codex [v{ANSI_GRAY}{version}{ANSI_RESET}]\n{ANSI_GRAY}OpenAI's command-line coding agent{ANSI_RESET}\n\
-\nFollow these steps to sign in with ChatGPT using device code authorization:\n\
+        "\nWelcome to Amcode [v{ANSI_GRAY}{version}{ANSI_RESET}]\n{ANSI_GRAY}Amnezia's command-line coding agent{ANSI_RESET}\n\
+\nFollow these steps to sign in with Amnezia using device code authorization:\n\
 \n1. Open this link in your browser and sign in to your account\n   {ANSI_BLUE}{verification_url}{ANSI_RESET}\n\
 \n2. Enter this one-time code {ANSI_GRAY}(expires in 15 minutes){ANSI_RESET}\n   {ANSI_BLUE}{code}{ANSI_RESET}\n\
 \n{ANSI_GRAY}Device codes are a common phishing target. Never share this code.{ANSI_RESET}\n",
@@ -160,7 +160,7 @@ pub async fn request_device_code(opts: &ServerOptions) -> std::io::Result<Device
     if !opts.auth_config.include_openai_chatgpt_params {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "device code login is only supported for ChatGPT auth. Use browser login for configured OIDC auth.",
+            "device code login is not enabled for this auth server. Use browser login instead.",
         ));
     }
 

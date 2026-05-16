@@ -247,6 +247,19 @@ fn workspace_dependencies_is_stable_and_enabled_by_default() {
 }
 
 #[test]
+fn custom_oidc_device_code_auth_is_under_development_and_disabled_by_default() {
+    assert_eq!(
+        Feature::CustomOidcDeviceCodeAuth.stage(),
+        Stage::UnderDevelopment
+    );
+    assert_eq!(Feature::CustomOidcDeviceCodeAuth.default_enabled(), false);
+    assert_eq!(
+        feature_for_key("custom_oidc_device_code_auth"),
+        Some(Feature::CustomOidcDeviceCodeAuth)
+    );
+}
+
+#[test]
 fn telepathy_is_legacy_alias_for_chronicle() {
     assert_eq!(Feature::Chronicle.stage(), Stage::UnderDevelopment);
     assert_eq!(Feature::Chronicle.default_enabled(), false);
