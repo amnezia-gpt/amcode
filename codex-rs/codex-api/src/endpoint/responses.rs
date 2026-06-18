@@ -6,11 +6,12 @@ use crate::error::ApiError;
 use crate::provider::Provider;
 use crate::requests::Compression;
 use crate::requests::attach_item_ids;
-use crate::requests::headers::build_conversation_headers;
+use crate::requests::headers::build_session_headers;
 use crate::requests::headers::insert_header;
 use crate::requests::headers::subagent_header;
 use crate::sse::spawn_response_stream;
 use crate::telemetry::SseTelemetry;
+use codex_client::EncodedJsonBody;
 use codex_client::HttpTransport;
 use codex_client::RequestCompression;
 use codex_client::RequestTelemetry;
@@ -30,7 +31,8 @@ pub struct ResponsesClient<T: HttpTransport> {
 
 #[derive(Default)]
 pub struct ResponsesOptions {
-    pub conversation_id: Option<String>,
+    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub session_source: Option<SessionSource>,
     pub extra_headers: HeaderMap,
     pub compression: Compression,
@@ -72,29 +74,36 @@ impl<T: HttpTransport> ResponsesClient<T> {
         options: ResponsesOptions,
     ) -> Result<ResponseStream, ApiError> {
         let ResponsesOptions {
-            conversation_id,
+            session_id,
+            thread_id,
             session_source,
             extra_headers,
             compression,
             turn_state,
         } = options;
 
-        let mut body = serde_json::to_value(&request)
-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
-        if request.store && self.session.provider().is_azure_responses_endpoint() {
+        let body = if request.store && self.session.provider().is_azure_responses_endpoint() {
+            let mut body = serde_json::to_value(&request).map_err(|e| {
+                ApiError::Stream(format!("failed to encode responses request: {e}"))
+            })?;
             attach_item_ids(&mut body, &request.input);
+            EncodedJsonBody::encode(&body)
+        } else {
+            EncodedJsonBody::encode(&request)
         }
+        .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
         let mut headers = extra_headers;
-        if let Some(ref conv_id) = conversation_id {
-            insert_header(&mut headers, "x-client-request-id", conv_id);
+        if let Some(ref thread_id) = thread_id {
+            insert_header(&mut headers, "x-client-request-id", thread_id);
         }
-        headers.extend(build_conversation_headers(conversation_id));
+        headers.extend(build_session_headers(session_id, thread_id));
         if let Some(subagent) = subagent_header(&session_source) {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
 
-        self.stream(body, headers, compression, turn_state).await
+        self.stream_encoded(body, headers, compression, turn_state)
+            .await
     }
 
     fn path() -> &'static str {
@@ -119,6 +128,19 @@ impl<T: HttpTransport> ResponsesClient<T> {
         compression: Compression,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
+        let body = EncodedJsonBody::encode(&body)
+            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        self.stream_encoded(body, extra_headers, compression, turn_state)
+            .await
+    }
+
+    async fn stream_encoded(
+        &self,
+        body: EncodedJsonBody,
+        extra_headers: HeaderMap,
+        compression: Compression,
+        turn_state: Option<Arc<OnceLock<String>>>,
+    ) -> Result<ResponseStream, ApiError> {
         let request_compression = match compression {
             Compression::None => RequestCompression::None,
             Compression::Zstd => RequestCompression::Zstd,
@@ -126,7 +148,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
 
         let stream_response = self
             .session
-            .stream_with(
+            .stream_encoded_json_with(
                 Method::POST,
                 Self::path(),
                 extra_headers,

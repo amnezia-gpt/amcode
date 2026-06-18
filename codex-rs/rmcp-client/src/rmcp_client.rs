@@ -12,7 +12,8 @@ use std::time::Instant;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_api::SharedAuthProvider;
-use codex_client::build_reqwest_client_with_custom_ca;
+use codex_client::maybe_build_rustls_client_config_with_custom_ca;
+use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::McpServerEnvVar;
 use codex_exec_server::HttpClient;
 use futures::FutureExt;
@@ -62,17 +63,29 @@ use tracing::warn;
 use crate::elicitation_client_service::ElicitationClientService;
 use crate::http_client_adapter::StreamableHttpClientAdapter;
 use crate::http_client_adapter::StreamableHttpClientAdapterError;
+use crate::in_process_transport::InProcessTransportFactory;
 use crate::load_oauth_tokens;
 use crate::oauth::OAuthPersistor;
 use crate::oauth::StoredOAuthTokens;
 use crate::stdio_server_launcher::StdioServerCommand;
 use crate::stdio_server_launcher::StdioServerLauncher;
+use crate::stdio_server_launcher::StdioServerProcessHandle;
 use crate::stdio_server_launcher::StdioServerTransport;
 use crate::utils::apply_default_headers;
 use crate::utils::build_default_headers;
 use codex_config::types::OAuthCredentialsStoreMode;
 
+#[path = "streamable_http_retry.rs"]
+mod streamable_http_retry;
+
+use self::streamable_http_retry::HandshakeError;
+use self::streamable_http_retry::STREAMABLE_HTTP_RETRY_DELAYS_MS;
+use self::streamable_http_retry::sleep_with_retry_deadline;
+
 enum PendingTransport {
+    InProcess {
+        transport: tokio::io::DuplexStream,
+    },
     Stdio {
         transport: StdioServerTransport,
     },
@@ -93,10 +106,14 @@ enum ClientState {
         service: Arc<RunningService<RoleClient, ElicitationClientService>>,
         oauth: Option<OAuthPersistor>,
     },
+    Closed,
 }
 
 #[derive(Clone)]
 enum TransportRecipe {
+    InProcess {
+        factory: Arc<dyn InProcessTransportFactory>,
+    },
     Stdio {
         command: StdioServerCommand,
         launcher: Arc<dyn StdioServerLauncher>,
@@ -108,6 +125,7 @@ enum TransportRecipe {
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         store_mode: OAuthCredentialsStoreMode,
+        keyring_backend_kind: AuthKeyringBackendKind,
         http_client: Arc<dyn HttpClient>,
         auth_provider: Option<SharedAuthProvider>,
     },
@@ -214,6 +232,25 @@ enum ClientOperationError {
     Timeout { label: String, duration: Duration },
 }
 
+fn remaining_operation_timeout(
+    label: &str,
+    timeout: Option<Duration>,
+    deadline: Option<Instant>,
+) -> std::result::Result<Option<Duration>, ClientOperationError> {
+    let Some(deadline) = deadline else {
+        return Ok(None);
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        Err(ClientOperationError::Timeout {
+            label: label.to_string(),
+            duration: timeout.unwrap_or(remaining),
+        })
+    } else {
+        Ok(Some(remaining))
+    }
+}
+
 pub type Elicitation = CreateElicitationRequestParams;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -240,6 +277,7 @@ impl From<ElicitationResponse> for CreateElicitationResult {
         Self {
             action: value.action,
             content: value.content,
+            meta: None,
         }
     }
 }
@@ -265,6 +303,7 @@ pub struct ListToolsWithConnectorIdResult {
 /// https://github.com/modelcontextprotocol/rust-sdk
 pub struct RmcpClient {
     state: Mutex<ClientState>,
+    stdio_process: Option<StdioServerProcessHandle>,
     transport_recipe: TransportRecipe,
     initialize_context: Mutex<Option<InitializeContext>>,
     session_recovery_lock: Semaphore,
@@ -272,6 +311,26 @@ pub struct RmcpClient {
 }
 
 impl RmcpClient {
+    pub async fn new_in_process_client(
+        factory: Arc<dyn InProcessTransportFactory>,
+    ) -> io::Result<Self> {
+        let transport_recipe = TransportRecipe::InProcess { factory };
+        let transport = Self::create_pending_transport(&transport_recipe)
+            .await
+            .map_err(io::Error::other)?;
+
+        Ok(Self {
+            state: Mutex::new(ClientState::Connecting {
+                transport: Some(transport),
+            }),
+            stdio_process: None,
+            transport_recipe,
+            initialize_context: Mutex::new(None),
+            session_recovery_lock: Semaphore::new(/*permits*/ 1),
+            elicitation_pause_state: ElicitationPauseState::new(),
+        })
+    }
+
     pub async fn new_stdio_client(
         program: OsString,
         args: Vec<OsString>,
@@ -287,11 +346,18 @@ impl RmcpClient {
         let transport = Self::create_pending_transport(&transport_recipe)
             .await
             .map_err(io::Error::other)?;
+        let stdio_process = match &transport {
+            PendingTransport::Stdio { transport } => Some(transport.process_handle()),
+            PendingTransport::InProcess { .. }
+            | PendingTransport::StreamableHttp { .. }
+            | PendingTransport::StreamableHttpWithOAuth { .. } => None,
+        };
 
         Ok(Self {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(transport),
             }),
+            stdio_process,
             transport_recipe,
             initialize_context: Mutex::new(None),
             session_recovery_lock: Semaphore::new(/*permits*/ 1),
@@ -307,6 +373,7 @@ impl RmcpClient {
         http_headers: Option<HashMap<String, String>>,
         env_http_headers: Option<HashMap<String, String>>,
         store_mode: OAuthCredentialsStoreMode,
+        keyring_backend_kind: AuthKeyringBackendKind,
         http_client: Arc<dyn HttpClient>,
         auth_provider: Option<SharedAuthProvider>,
     ) -> Result<Self> {
@@ -317,6 +384,7 @@ impl RmcpClient {
             http_headers,
             env_http_headers,
             store_mode,
+            keyring_backend_kind,
             http_client,
             auth_provider,
         };
@@ -325,6 +393,7 @@ impl RmcpClient {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(transport),
             }),
+            stdio_process: None,
             transport_recipe,
             initialize_context: Mutex::new(None),
             session_recovery_lock: Semaphore::new(/*permits*/ 1),
@@ -353,12 +422,17 @@ impl RmcpClient {
                     None => return Err(anyhow!("client already initializing")),
                 },
                 ClientState::Ready { .. } => return Err(anyhow!("client already initialized")),
+                ClientState::Closed => return Err(anyhow!("MCP client is shut down")),
             }
         };
 
-        let (service, oauth_persistor) =
-            Self::connect_pending_transport(pending_transport, client_service.clone(), timeout)
-                .await?;
+        let (service, oauth_persistor) = self
+            .connect_pending_transport_with_initialize_retries(
+                pending_transport,
+                client_service.clone(),
+                timeout,
+            )
+            .await?;
 
         let initialize_result_rmcp = service
             .peer()
@@ -376,6 +450,9 @@ impl RmcpClient {
 
         {
             let mut guard = self.state.lock().await;
+            if matches!(*guard, ClientState::Closed) {
+                return Err(anyhow!("MCP client is shut down"));
+            }
             *guard = ClientState::Ready {
                 service,
                 oauth: oauth_persistor.clone(),
@@ -526,29 +603,22 @@ impl RmcpClient {
             }
             None => None,
         };
-        let rmcp_params = CallToolRequestParams {
-            meta: None,
-            name: name.into(),
-            arguments,
-            task: None,
-        };
+        let mut rmcp_params = CallToolRequestParams::new(name);
+        rmcp_params.arguments = arguments;
         let result = self
             .run_service_operation("tools/call", timeout, move |service| {
                 let rmcp_params = rmcp_params.clone();
                 let meta = meta.clone();
                 async move {
+                    let mut options = rmcp::service::PeerRequestOptions::no_options();
+                    options.meta = meta;
                     let result = service
                         .peer()
                         .send_request_with_option(
-                            ClientRequest::CallToolRequest(rmcp::model::CallToolRequest {
-                                method: Default::default(),
-                                params: rmcp_params,
-                                extensions: Default::default(),
-                            }),
-                            rmcp::service::PeerRequestOptions {
-                                timeout: None,
-                                meta,
-                            },
+                            ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+                                rmcp_params,
+                            )),
+                            options,
                         )
                         .await?
                         .await_response()
@@ -623,6 +693,7 @@ impl RmcpClient {
         match &*guard {
             ClientState::Ready { service, .. } => Ok(Arc::clone(service)),
             ClientState::Connecting { .. } => Err(anyhow!("MCP client not initialized")),
+            ClientState::Closed => Err(anyhow!("MCP client is shut down")),
         }
     }
 
@@ -635,6 +706,22 @@ impl RmcpClient {
             } => Some(runtime.clone()),
             _ => None,
         }
+    }
+
+    /// Stop the MCP transport and any stdio server process owned by this client.
+    pub async fn shutdown(&self) {
+        let previous_state = {
+            let mut guard = self.state.lock().await;
+            std::mem::replace(&mut *guard, ClientState::Closed)
+        };
+
+        if let Some(process) = &self.stdio_process
+            && let Err(error) = process.terminate().await
+        {
+            warn!("failed to terminate MCP stdio server process: {error}");
+        }
+
+        drop(previous_state);
     }
 
     /// This should be called after every tool call so that if a given tool call triggered
@@ -659,6 +746,10 @@ impl RmcpClient {
         transport_recipe: &TransportRecipe,
     ) -> Result<PendingTransport> {
         match transport_recipe {
+            TransportRecipe::InProcess { factory } => {
+                let transport = factory.open().await?;
+                Ok(PendingTransport::InProcess { transport })
+            }
             TransportRecipe::Stdio { command, launcher } => {
                 let transport = launcher.launch(command.clone()).await?;
                 Ok(PendingTransport::Stdio { transport })
@@ -670,6 +761,7 @@ impl RmcpClient {
                 http_headers,
                 env_http_headers,
                 store_mode,
+                keyring_backend_kind,
                 http_client,
                 auth_provider,
             } => {
@@ -680,7 +772,7 @@ impl RmcpClient {
                     && auth_provider.is_none()
                     && !default_headers.contains_key(AUTHORIZATION)
                 {
-                    match load_oauth_tokens(server_name, url, *store_mode) {
+                    match load_oauth_tokens(server_name, url, *store_mode, *keyring_backend_kind) {
                         Ok(tokens) => tokens,
                         Err(err) => {
                             warn!("failed to read tokens for server `{server_name}`: {err}");
@@ -697,6 +789,7 @@ impl RmcpClient {
                         url,
                         initial_tokens.clone(),
                         *store_mode,
+                        *keyring_backend_kind,
                         default_headers.clone(),
                         Arc::clone(http_client),
                     )
@@ -767,6 +860,10 @@ impl RmcpClient {
         Option<OAuthPersistor>,
     )> {
         let (transport, oauth_persistor) = match pending_transport {
+            PendingTransport::InProcess { transport } => (
+                service::serve_client(client_service, transport).boxed(),
+                None,
+            ),
             PendingTransport::Stdio { transport } => (
                 service::serve_client(client_service, transport).boxed(),
                 None,
@@ -784,14 +881,31 @@ impl RmcpClient {
             ),
         };
 
-        let service = match timeout {
-            Some(duration) => time::timeout(duration, transport)
-                .await
-                .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))?
-                .map_err(|err| anyhow!("handshaking with MCP server failed: {err}"))?,
+        let service_result = match timeout {
+            Some(duration) => match time::timeout(duration, transport).await {
+                Ok(result) => {
+                    result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
+                }
+                Err(_elapsed) => Err(anyhow!(
+                    "timed out handshaking with MCP server after {duration:?}"
+                )),
+            },
             None => transport
                 .await
-                .map_err(|err| anyhow!("handshaking with MCP server failed: {err}"))?,
+                .map_err(|source| anyhow::Error::from(HandshakeError { source })),
+        };
+        let service = match service_result {
+            Ok(service) => service,
+            Err(error) => {
+                if let Some(runtime) = oauth_persistor.as_ref()
+                    && let Err(persist_error) = runtime.persist_if_needed().await
+                {
+                    warn!(
+                        "failed to persist OAuth tokens after failed initialize: {persist_error}"
+                    );
+                }
+                return Err(error);
+            }
         };
 
         Ok((Arc::new(service), oauth_persistor))
@@ -808,7 +922,7 @@ impl RmcpClient {
         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
     {
         let service = self.service().await?;
-        match Self::run_service_operation_once(
+        match Self::run_service_operation_with_transient_retries(
             Arc::clone(&service),
             label,
             timeout,
@@ -821,7 +935,7 @@ impl RmcpClient {
             Err(error) if Self::is_session_expired_404(&error) => {
                 self.reinitialize_after_session_expiry(&service).await?;
                 let recovered_service = self.service().await?;
-                Self::run_service_operation_once(
+                Self::run_service_operation_with_transient_retries(
                     recovered_service,
                     label,
                     timeout,
@@ -833,6 +947,62 @@ impl RmcpClient {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn run_service_operation_with_transient_retries<T, F, Fut>(
+        service: Arc<RunningService<RoleClient, ElicitationClientService>>,
+        label: &str,
+        timeout: Option<Duration>,
+        pause_state: ElicitationPauseState,
+        operation: &F,
+    ) -> std::result::Result<T, ClientOperationError>
+    where
+        F: Fn(Arc<RunningService<RoleClient, ElicitationClientService>>) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
+    {
+        let retry_deadline = timeout.map(|duration| Instant::now() + duration);
+        for (attempt, retry_delay_ms) in STREAMABLE_HTTP_RETRY_DELAYS_MS
+            .iter()
+            .copied()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate()
+        {
+            let attempt_timeout = remaining_operation_timeout(label, timeout, retry_deadline)?;
+            match Self::run_service_operation_once(
+                Arc::clone(&service),
+                label,
+                attempt_timeout,
+                pause_state.clone(),
+                operation,
+            )
+            .await
+            {
+                Ok(result) => return Ok(result),
+                Err(error) if Self::is_retryable_tools_list_error(label, &error) => {
+                    let Some(retry_delay_ms) = retry_delay_ms else {
+                        return Err(error);
+                    };
+                    let delay = Duration::from_millis(retry_delay_ms);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_attempts = STREAMABLE_HTTP_RETRY_DELAYS_MS.len() + 1,
+                        delay_ms = delay.as_millis(),
+                        error = %error,
+                        "streamable HTTP MCP tools/list failed with a retryable error; retrying"
+                    );
+                    if !sleep_with_retry_deadline(delay, retry_deadline).await {
+                        return Err(ClientOperationError::Timeout {
+                            label: label.to_string(),
+                            duration: timeout.unwrap_or(delay),
+                        });
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("service operation retry loop should return on success or final error")
     }
 
     async fn run_service_operation_once<T, F, Fut>(
@@ -858,6 +1028,22 @@ impl RmcpClient {
             }
             None => operation(service).await.map_err(ClientOperationError::from),
         }
+    }
+
+    fn is_retryable_tools_list_error(label: &str, error: &ClientOperationError) -> bool {
+        if label != "tools/list" {
+            return false;
+        }
+        let ClientOperationError::Service(rmcp::service::ServiceError::TransportSend(error)) =
+            error
+        else {
+            return false;
+        };
+
+        error
+            .error
+            .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
+            .is_some_and(Self::is_retryable_streamable_http_error)
     }
 
     fn is_session_expired_404(error: &ClientOperationError) -> bool {
@@ -900,6 +1086,9 @@ impl RmcpClient {
                 ClientState::Connecting { .. } => {
                     return Err(anyhow!("MCP client not initialized"));
                 }
+                ClientState::Closed => {
+                    return Err(anyhow!("MCP client is shut down"));
+                }
             }
         }
 
@@ -910,15 +1099,19 @@ impl RmcpClient {
             .clone()
             .ok_or_else(|| anyhow!("MCP client cannot recover before initialize succeeds"))?;
         let pending_transport = Self::create_pending_transport(&self.transport_recipe).await?;
-        let (service, oauth_persistor) = Self::connect_pending_transport(
-            pending_transport,
-            initialize_context.client_service,
-            initialize_context.timeout,
-        )
-        .await?;
+        let (service, oauth_persistor) = self
+            .connect_pending_transport_with_initialize_retries(
+                pending_transport,
+                initialize_context.client_service,
+                initialize_context.timeout,
+            )
+            .await?;
 
         {
             let mut guard = self.state.lock().await;
+            if matches!(*guard, ClientState::Closed) {
+                return Err(anyhow!("MCP client is shut down"));
+            }
             *guard = ClientState::Ready {
                 service,
                 oauth: oauth_persistor.clone(),
@@ -940,14 +1133,18 @@ async fn create_oauth_transport_and_runtime(
     url: &str,
     initial_tokens: StoredOAuthTokens,
     credentials_store: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
     default_headers: HeaderMap,
     http_client: Arc<dyn HttpClient>,
 ) -> Result<(
     StreamableHttpClientTransport<AuthClient<StreamableHttpClientAdapter>>,
     OAuthPersistor,
 )> {
-    let builder = apply_default_headers(reqwest::Client::builder(), &default_headers);
-    let oauth_metadata_client = build_reqwest_client_with_custom_ca(builder)?;
+    let mut builder = apply_default_headers(reqwest::Client::builder(), &default_headers);
+    if let Some(tls_config) = maybe_build_rustls_client_config_with_custom_ca()? {
+        builder = builder.tls_backend_preconfigured(tls_config.as_ref().clone());
+    }
+    let oauth_metadata_client = builder.build()?;
     // TODO(aibrahim): teach OAuth bootstrap and refresh to use the same
     // shared HTTP client abstraction instead of always creating the local
     // reqwest metadata client here.
@@ -964,7 +1161,7 @@ async fn create_oauth_transport_and_runtime(
     let manager = match oauth_state {
         OAuthState::Authorized(manager) => manager,
         OAuthState::Unauthorized(manager) => manager,
-        OAuthState::Session(_) | OAuthState::AuthorizedHttpClient(_) => {
+        _ => {
             return Err(anyhow!("unexpected OAuth state during client setup"));
         }
     };
@@ -985,6 +1182,7 @@ async fn create_oauth_transport_and_runtime(
         url.to_string(),
         auth_manager,
         credentials_store,
+        keyring_backend_kind,
         Some(initial_tokens),
     );
 

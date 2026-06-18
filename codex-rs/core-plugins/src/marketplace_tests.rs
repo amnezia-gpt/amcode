@@ -388,6 +388,7 @@ fn list_marketplaces_supports_alternate_manifest_layout() {
             interface: None,
             plugins: vec![MarketplacePlugin {
                 name: "string-source-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(repo_root.join("plugins/string-source-plugin"))
                         .unwrap(),
@@ -413,9 +414,96 @@ fn list_marketplaces_supports_alternate_manifest_layout() {
                     logo: None,
                     screenshots: Vec::new(),
                 }),
+                keywords: Vec::new(),
             }],
         }]
     );
+}
+
+#[test]
+fn list_marketplaces_supports_repo_root_local_plugin_sources() {
+    for path in [".", "./"] {
+        let tmp = tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+
+        fs::create_dir_all(repo_root.join(".git")).unwrap();
+        fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+        fs::create_dir_all(repo_root.join(".codex-plugin")).unwrap();
+        fs::write(
+            repo_root.join(".agents/plugins/marketplace.json"),
+            format!(
+                r#"{{
+  "name": "repo-root-marketplace",
+  "plugins": [
+    {{
+      "name": "repo-root-plugin",
+      "source": {{
+        "source": "local",
+        "path": "{path}"
+      }}
+    }}
+  ]
+}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            repo_root.join(".codex-plugin/plugin.json"),
+            r#"{
+  "name":"repo-root-plugin",
+  "interface": {
+    "displayName": "Repo Root Plugin"
+  }
+}"#,
+        )
+        .unwrap();
+
+        let marketplaces = list_marketplaces_with_home(
+            &[AbsolutePathBuf::try_from(repo_root.clone()).unwrap()],
+            /*home_dir*/ None,
+        )
+        .unwrap()
+        .marketplaces;
+
+        assert_eq!(
+            marketplaces,
+            vec![Marketplace {
+                name: "repo-root-marketplace".to_string(),
+                path: AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json"))
+                    .unwrap(),
+                interface: None,
+                plugins: vec![MarketplacePlugin {
+                    name: "repo-root-plugin".to_string(),
+                    local_version: None,
+                    source: MarketplacePluginSource::Local {
+                        path: AbsolutePathBuf::try_from(repo_root).unwrap(),
+                    },
+                    policy: MarketplacePluginPolicy {
+                        installation: MarketplacePluginInstallPolicy::Available,
+                        authentication: MarketplacePluginAuthPolicy::OnInstall,
+                        products: None,
+                    },
+                    interface: Some(PluginManifestInterface {
+                        display_name: Some("Repo Root Plugin".to_string()),
+                        short_description: None,
+                        long_description: None,
+                        developer_name: None,
+                        category: None,
+                        capabilities: Vec::new(),
+                        website_url: None,
+                        privacy_policy_url: None,
+                        terms_of_service_url: None,
+                        default_prompt: None,
+                        brand_color: None,
+                        composer_icon: None,
+                        logo: None,
+                        screenshots: Vec::new(),
+                    }),
+                    keywords: Vec::new(),
+                }],
+            }]
+        );
+    }
 }
 
 #[test]
@@ -452,6 +540,7 @@ fn list_marketplaces_includes_plugins_without_discoverable_manifest() {
             interface: None,
             plugins: vec![MarketplacePlugin {
                 name: "missing-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(repo_root.join("plugins/missing-plugin"),)
                         .unwrap(),
@@ -462,6 +551,7 @@ fn list_marketplaces_includes_plugins_without_discoverable_manifest() {
                     products: None,
                 },
                 interface: None,
+                keywords: Vec::new(),
             }],
         }]
     );
@@ -515,6 +605,62 @@ fn list_marketplaces_prefers_first_supported_manifest_layout() {
     assert_eq!(
         marketplaces[0].path,
         AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap()
+    );
+}
+
+#[test]
+fn list_marketplaces_supports_explicit_api_marketplace_manifest_path() {
+    let tmp = tempdir().unwrap();
+    let repo_root = tmp.path().join("repo");
+
+    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+    let marketplace_path =
+        AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/api_marketplace.json")).unwrap();
+    fs::write(
+        marketplace_path.as_path(),
+        r#"{
+  "name": "openai-api-curated",
+  "plugins": [
+    {
+      "name": "api-plugin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/api-plugin"
+      }
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    let marketplaces = list_marketplaces_with_home(
+        std::slice::from_ref(&marketplace_path),
+        /*home_dir*/ None,
+    )
+    .unwrap()
+    .marketplaces;
+
+    assert_eq!(
+        marketplaces,
+        vec![Marketplace {
+            name: "openai-api-curated".to_string(),
+            path: marketplace_path,
+            interface: None,
+            plugins: vec![MarketplacePlugin {
+                name: "api-plugin".to_string(),
+                local_version: None,
+                source: MarketplacePluginSource::Local {
+                    path: AbsolutePathBuf::try_from(repo_root.join("plugins/api-plugin")).unwrap(),
+                },
+                policy: MarketplacePluginPolicy {
+                    installation: MarketplacePluginInstallPolicy::Available,
+                    authentication: MarketplacePluginAuthPolicy::OnInstall,
+                    products: None,
+                },
+                interface: None,
+                keywords: Vec::new(),
+            }],
+        }]
     );
 }
 
@@ -593,6 +739,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
                 plugins: vec![
                     MarketplacePlugin {
                         name: "shared-plugin".to_string(),
+                        local_version: None,
                         source: MarketplacePluginSource::Local {
                             path: AbsolutePathBuf::try_from(home_root.join("home-shared")).unwrap(),
                         },
@@ -602,9 +749,11 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
                             products: None,
                         },
                         interface: None,
+                        keywords: Vec::new(),
                     },
                     MarketplacePlugin {
                         name: "home-only".to_string(),
+                        local_version: None,
                         source: MarketplacePluginSource::Local {
                             path: AbsolutePathBuf::try_from(home_root.join("home-only")).unwrap(),
                         },
@@ -614,6 +763,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
                             products: None,
                         },
                         interface: None,
+                        keywords: Vec::new(),
                     },
                 ],
             },
@@ -626,6 +776,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
                 plugins: vec![
                     MarketplacePlugin {
                         name: "shared-plugin".to_string(),
+                        local_version: None,
                         source: MarketplacePluginSource::Local {
                             path: AbsolutePathBuf::try_from(repo_root.join("repo-shared")).unwrap(),
                         },
@@ -635,9 +786,11 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
                             products: None,
                         },
                         interface: None,
+                        keywords: Vec::new(),
                     },
                     MarketplacePlugin {
                         name: "repo-only".to_string(),
+                        local_version: None,
                         source: MarketplacePluginSource::Local {
                             path: AbsolutePathBuf::try_from(repo_root.join("repo-only")).unwrap(),
                         },
@@ -647,6 +800,7 @@ fn list_marketplaces_returns_home_and_repo_marketplaces() {
                             products: None,
                         },
                         interface: None,
+                        keywords: Vec::new(),
                     },
                 ],
             },
@@ -715,6 +869,7 @@ fn list_marketplaces_keeps_distinct_entries_for_same_name() {
                 interface: None,
                 plugins: vec![MarketplacePlugin {
                     name: "local-plugin".to_string(),
+                    local_version: None,
                     source: MarketplacePluginSource::Local {
                         path: AbsolutePathBuf::try_from(home_root.join("home-plugin")).unwrap(),
                     },
@@ -724,6 +879,7 @@ fn list_marketplaces_keeps_distinct_entries_for_same_name() {
                         products: None,
                     },
                     interface: None,
+                    keywords: Vec::new(),
                 }],
             },
             Marketplace {
@@ -732,6 +888,7 @@ fn list_marketplaces_keeps_distinct_entries_for_same_name() {
                 interface: None,
                 plugins: vec![MarketplacePlugin {
                     name: "local-plugin".to_string(),
+                    local_version: None,
                     source: MarketplacePluginSource::Local {
                         path: AbsolutePathBuf::try_from(repo_root.join("repo-plugin")).unwrap(),
                     },
@@ -741,6 +898,7 @@ fn list_marketplaces_keeps_distinct_entries_for_same_name() {
                         products: None,
                     },
                     interface: None,
+                    keywords: Vec::new(),
                 }],
             },
         ]
@@ -805,6 +963,7 @@ fn list_marketplaces_dedupes_multiple_roots_in_same_repo() {
             interface: None,
             plugins: vec![MarketplacePlugin {
                 name: "local-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(repo_root.join("plugin")).unwrap(),
                 },
@@ -814,6 +973,7 @@ fn list_marketplaces_dedupes_multiple_roots_in_same_repo() {
                     products: None,
                 },
                 interface: None,
+                keywords: Vec::new(),
             }],
         }]
     );
@@ -967,6 +1127,7 @@ fn list_marketplaces_skips_plugins_with_invalid_names_but_keeps_marketplace() {
             interface: None,
             plugins: vec![MarketplacePlugin {
                 name: "valid-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(repo_root.join("valid-plugin")).unwrap(),
                 },
@@ -976,6 +1137,7 @@ fn list_marketplaces_skips_plugins_with_invalid_names_but_keeps_marketplace() {
                     products: None,
                 },
                 interface: None,
+                keywords: Vec::new(),
             }],
         }]
     );
@@ -1083,6 +1245,7 @@ fn list_marketplaces_keeps_remote_and_local_plugin_sources() {
         vec![
             MarketplacePlugin {
                 name: "local-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Local {
                     path: AbsolutePathBuf::try_from(repo_root.join("plugins/local-plugin"))
                         .unwrap(),
@@ -1093,9 +1256,11 @@ fn list_marketplaces_keeps_remote_and_local_plugin_sources() {
                     products: None,
                 },
                 interface: None,
+                keywords: Vec::new(),
             },
             MarketplacePlugin {
                 name: "url-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Git {
                     url: "https://github.com/example/plugin.git".to_string(),
                     path: None,
@@ -1108,9 +1273,11 @@ fn list_marketplaces_keeps_remote_and_local_plugin_sources() {
                     products: None,
                 },
                 interface: None,
+                keywords: Vec::new(),
             },
             MarketplacePlugin {
                 name: "git-subdir-plugin".to_string(),
+                local_version: None,
                 source: MarketplacePluginSource::Git {
                     url: "https://github.com/owner/repo.git".to_string(),
                     path: Some("plugins/example".to_string()),
@@ -1123,6 +1290,7 @@ fn list_marketplaces_keeps_remote_and_local_plugin_sources() {
                     products: None,
                 },
                 interface: None,
+                keywords: Vec::new(),
             },
         ]
     );
@@ -1341,37 +1509,41 @@ fn list_marketplaces_ignores_plugin_interface_assets_without_dot_slash() {
 
 #[test]
 fn find_marketplace_plugin_skips_invalid_local_paths() {
-    let tmp = tempdir().unwrap();
-    let repo_root = tmp.path().join("repo");
-    fs::create_dir_all(repo_root.join(".git")).unwrap();
-    fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
-    fs::write(
-        repo_root.join(".agents/plugins/marketplace.json"),
-        r#"{
+    for path in ["", "plugin-1", "././", "./plugins/../", "../plugin-1"] {
+        let tmp = tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(repo_root.join(".git")).unwrap();
+        fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+        fs::write(
+            repo_root.join(".agents/plugins/marketplace.json"),
+            format!(
+                r#"{{
   "name": "codex-curated",
   "plugins": [
-    {
+    {{
       "name": "local-plugin",
-      "source": {
+      "source": {{
         "source": "local",
-        "path": "../plugin-1"
-      }
-    }
+        "path": "{path}"
+      }}
+    }}
   ]
-}"#,
-    )
-    .unwrap();
+}}"#
+            ),
+        )
+        .unwrap();
 
-    let err = find_marketplace_plugin(
-        &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
-        "local-plugin",
-    )
-    .unwrap_err();
+        let err = find_marketplace_plugin(
+            &AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json")).unwrap(),
+            "local-plugin",
+        )
+        .unwrap_err();
 
-    assert_eq!(
-        err.to_string(),
-        "plugin `local-plugin` was not found in marketplace `codex-curated`"
-    );
+        assert_eq!(
+            err.to_string(),
+            "plugin `local-plugin` was not found in marketplace `codex-curated`"
+        );
+    }
 }
 
 #[test]

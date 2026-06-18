@@ -7,7 +7,6 @@ use codex_plugin::PluginId;
 use codex_plugin::PluginIdError;
 use codex_protocol::protocol::Product;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use dirs::home_dir;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::fs;
@@ -19,6 +18,7 @@ use tracing::warn;
 
 const MARKETPLACE_MANIFEST_RELATIVE_PATHS: &[&str] = &[
     ".agents/plugins/marketplace.json",
+    ".agents/plugins/api_marketplace.json",
     ".claude-plugin/marketplace.json",
 ];
 
@@ -59,9 +59,11 @@ pub struct MarketplaceInterface {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarketplacePlugin {
     pub name: String,
+    pub local_version: Option<String>,
     pub source: MarketplacePluginSource,
     pub policy: MarketplacePluginPolicy,
     pub interface: Option<PluginManifestInterface>,
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +225,16 @@ pub fn list_marketplaces(
     list_marketplaces_with_home(additional_roots, home_dir().as_deref())
 }
 
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .find(|path| path.is_absolute())
+        .or_else(dirs::home_dir)
+}
+
 pub fn validate_marketplace_root(root: &Path) -> Result<String, MarketplaceError> {
     let Some(path) = find_marketplace_manifest_path(root) else {
         return Err(MarketplaceError::InvalidMarketplaceFile {
@@ -244,6 +256,19 @@ pub fn find_marketplace_manifest_path(root: &Path) -> Option<AbsolutePathBuf> {
             }
             AbsolutePathBuf::try_from(path).ok()
         })
+}
+
+fn supported_marketplace_manifest_path(path: &Path) -> Option<AbsolutePathBuf> {
+    if !path.is_file() {
+        return None;
+    }
+    if !MARKETPLACE_MANIFEST_RELATIVE_PATHS
+        .iter()
+        .any(|relative_path| marketplace_root_from_layout(path, relative_path).is_some())
+    {
+        return None;
+    }
+    AbsolutePathBuf::try_from(path.to_path_buf()).ok()
 }
 
 fn invalid_marketplace_layout_error(path: &AbsolutePathBuf) -> MarketplaceError {
@@ -288,11 +313,22 @@ pub fn load_marketplace(path: &AbsolutePathBuf) -> Result<Marketplace, Marketpla
             Err(err) => return Err(err),
         };
 
+        let local_version = plugin
+            .manifest
+            .as_ref()
+            .and_then(|manifest| manifest.version.clone());
+        let keywords = plugin
+            .manifest
+            .map(|manifest| manifest.keywords)
+            .unwrap_or_default();
+
         plugins.push(MarketplacePlugin {
             name: plugin.plugin_id.plugin_name,
+            local_version,
             source: plugin.source,
             policy: plugin.policy,
             interface: plugin.interface,
+            keywords,
         });
     }
 
@@ -344,6 +380,12 @@ fn discover_marketplace_paths_from_roots(
     }
 
     for root in additional_roots {
+        if let Some(path) = supported_marketplace_manifest_path(root.as_path())
+            && !paths.contains(&path)
+        {
+            paths.push(path);
+            continue;
+        }
         // Curated marketplaces can now come from an HTTP-downloaded directory that is not a git
         // checkout, so check the root directly before falling back to repo-root discovery.
         if let Some(path) = find_marketplace_manifest_path(root.as_path())
@@ -502,20 +544,26 @@ fn resolve_local_plugin_source_path(
     marketplace_path: &AbsolutePathBuf,
     path: &str,
 ) -> Result<AbsolutePathBuf, MarketplaceError> {
-    let Some(path) = path.strip_prefix("./") else {
+    match path {
+        "" => {
+            return Err(MarketplaceError::InvalidMarketplaceFile {
+                path: marketplace_path.to_path_buf(),
+                message: "local plugin source path must not be empty".to_string(),
+            });
+        }
+        "." | "./" => return marketplace_root_dir(marketplace_path),
+        _ => {}
+    }
+
+    // Non-root local sources must keep the explicit `./` prefix and remain normalized.
+    let Some(relative_path) = path.strip_prefix("./") else {
         return Err(MarketplaceError::InvalidMarketplaceFile {
             path: marketplace_path.to_path_buf(),
             message: "local plugin source path must start with `./`".to_string(),
         });
     };
-    if path.is_empty() {
-        return Err(MarketplaceError::InvalidMarketplaceFile {
-            path: marketplace_path.to_path_buf(),
-            message: "local plugin source path must not be empty".to_string(),
-        });
-    }
 
-    let relative_source_path = Path::new(path);
+    let relative_source_path = Path::new(relative_path);
     if relative_source_path
         .components()
         .any(|component| !matches!(component, Component::Normal(_)))
@@ -676,7 +724,8 @@ pub fn plugin_interface_with_marketplace_category(
     interface
 }
 
-fn marketplace_root_dir(
+#[doc(hidden)]
+pub fn marketplace_root_dir(
     marketplace_path: &AbsolutePathBuf,
 ) -> Result<AbsolutePathBuf, MarketplaceError> {
     for relative_path in MARKETPLACE_MANIFEST_RELATIVE_PATHS {

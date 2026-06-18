@@ -99,6 +99,7 @@ async fn make_config_for_cwd(codex_home: &TempDir, cwd: PathBuf) -> TestConfig {
         ConfigLayerEntry::new(
             ConfigLayerSource::User {
                 file: config_file(user_config_path),
+                profile: None,
             },
             TomlValue::Table(toml::map::Map::new()),
         ),
@@ -164,7 +165,10 @@ async fn skill_roots_from_layer_stack_maps_user_to_user_and_system_cache_and_sys
             TomlValue::Table(toml::map::Map::new()),
         ),
         ConfigLayerEntry::new(
-            ConfigLayerSource::User { file: user_file },
+            ConfigLayerSource::User {
+                file: user_file,
+                profile: None,
+            },
             TomlValue::Table(toml::map::Map::new()),
         ),
     ];
@@ -222,7 +226,10 @@ async fn skill_roots_from_layer_stack_includes_disabled_project_layers() -> anyh
 
     let layers = vec![
         ConfigLayerEntry::new(
-            ConfigLayerSource::User { file: user_file },
+            ConfigLayerSource::User {
+                file: user_file,
+                profile: None,
+            },
             TomlValue::Table(toml::map::Map::new()),
         ),
         ConfigLayerEntry::new_disabled(
@@ -281,7 +288,10 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
 
     let user_file = user_folder.join("config.toml").abs();
     let layers = vec![ConfigLayerEntry::new(
-        ConfigLayerSource::User { file: user_file },
+        ConfigLayerSource::User {
+            file: user_file,
+            profile: None,
+        },
         TomlValue::Table(toml::map::Map::new()),
     )];
     let stack = ConfigLayerStack::new(
@@ -322,6 +332,7 @@ async fn loads_skills_from_home_agents_dir_for_user_scope() -> anyhow::Result<()
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 
@@ -389,11 +400,6 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
   "dependencies": {
     "tools": [
       {
-        "type": "env_var",
-        "value": "GITHUB_TOKEN",
-        "description": "GitHub API token with repo scopes"
-      },
-      {
         "type": "mcp",
         "value": "github",
         "description": "GitHub MCP server",
@@ -436,14 +442,6 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
             dependencies: Some(SkillDependencies {
                 tools: vec![
                     SkillToolDependency {
-                        r#type: "env_var".to_string(),
-                        value: "GITHUB_TOKEN".to_string(),
-                        description: Some("GitHub API token with repo scopes".to_string()),
-                        transport: None,
-                        command: None,
-                        url: None,
-                    },
-                    SkillToolDependency {
                         r#type: "mcp".to_string(),
                         value: "github".to_string(),
                         description: Some("GitHub MCP server".to_string()),
@@ -472,6 +470,7 @@ async fn loads_skill_dependencies_metadata_from_yaml() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -527,6 +526,7 @@ interface:
             policy: None,
             path_to_skills_md: normalized(skill_path.as_path()),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -680,6 +680,7 @@ async fn accepts_icon_paths_under_assets_dir() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -720,6 +721,7 @@ async fn ignores_invalid_brand_color() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -773,6 +775,7 @@ async fn ignores_default_prompt_over_max_length() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -814,6 +817,119 @@ async fn drops_interface_when_icons_are_invalid() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn loads_plugin_skill_interface_icons_from_shared_plugin_assets() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("plugins/twilio-developer-kit");
+    let skill_path = write_skill_at(
+        &plugin_root.join("skills"),
+        "twilio-send-message",
+        "send-message",
+        "send messages",
+    );
+    let skill_dir = skill_path.parent().expect("skill dir");
+    fs::create_dir_all(plugin_root.join("assets")).unwrap();
+    fs::write(plugin_root.join("assets/logo.svg"), "<svg/>").unwrap();
+    write_skill_interface_at(
+        skill_dir,
+        r##"
+interface:
+  icon_small: "../../assets/logo.svg"
+  icon_large: "../../assets/logo.svg"
+"##,
+    );
+
+    let plugin_root_abs = plugin_root.abs();
+    let outcome = load_skills_from_roots([SkillRoot {
+        path: plugin_root.join("skills").abs(),
+        scope: SkillScope::User,
+        file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: Some("twilio-developer-kit@test".to_string()),
+        plugin_namespace: None,
+        plugin_root: Some(plugin_root_abs.clone()),
+    }])
+    .await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    let expected_icon_path = normalized(&plugin_root.join("assets/logo.svg"));
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "send-message".to_string(),
+            description: "send messages".to_string(),
+            short_description: None,
+            interface: Some(SkillInterface {
+                display_name: None,
+                short_description: None,
+                icon_small: Some(expected_icon_path.clone()),
+                icon_large: Some(expected_icon_path),
+                brand_color: None,
+                default_prompt: None,
+            }),
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: Some("twilio-developer-kit@test".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn drops_plugin_skill_interface_icons_that_escape_shared_plugin_assets() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_root = root.path().join("plugins/twilio-developer-kit");
+    let skill_path = write_skill_at(
+        &plugin_root.join("skills"),
+        "twilio-send-message",
+        "send-message",
+        "send messages",
+    );
+    let skill_dir = skill_path.parent().expect("skill dir");
+    write_skill_interface_at(
+        skill_dir,
+        r##"
+interface:
+  icon_small: "../../other/logo.svg"
+"##,
+    );
+
+    let outcome = load_skills_from_roots([SkillRoot {
+        path: plugin_root.join("skills").abs(),
+        scope: SkillScope::User,
+        file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: Some("twilio-developer-kit@test".to_string()),
+        plugin_namespace: None,
+        plugin_root: Some(plugin_root.abs()),
+    }])
+    .await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "send-message".to_string(),
+            description: "send messages".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: Some("twilio-developer-kit@test".to_string()),
         }]
     );
 }
@@ -858,6 +974,7 @@ async fn loads_skills_via_symlinked_subdir_for_user_scope() {
             policy: None,
             path_to_skills_md: normalized(&shared_skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -917,6 +1034,7 @@ async fn does_not_loop_on_symlink_cycle_for_user_scope() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -936,6 +1054,9 @@ async fn loads_skills_via_symlinked_subdir_for_admin_scope() {
         path: admin_root.path().abs(),
         scope: SkillScope::Admin,
         file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: None,
+        plugin_namespace: None,
+        plugin_root: None,
     }])
     .await;
 
@@ -955,6 +1076,7 @@ async fn loads_skills_via_symlinked_subdir_for_admin_scope() {
             policy: None,
             path_to_skills_md: normalized(&shared_skill_path),
             scope: SkillScope::Admin,
+            plugin_id: None,
         }]
     );
 }
@@ -994,6 +1116,7 @@ async fn loads_skills_via_symlinked_subdir_for_repo_scope() {
             policy: None,
             path_to_skills_md: normalized(&linked_skill_path),
             scope: SkillScope::Repo,
+            plugin_id: None,
         }]
     );
 }
@@ -1014,6 +1137,9 @@ async fn system_scope_ignores_symlinked_subdir() {
         path: system_root.abs(),
         scope: SkillScope::System,
         file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: None,
+        plugin_namespace: None,
+        plugin_root: None,
     }])
     .await;
     assert!(
@@ -1046,6 +1172,9 @@ async fn respects_max_scan_depth_for_user_scope() {
         path: skills_root.abs(),
         scope: SkillScope::User,
         file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: None,
+        plugin_namespace: None,
+        plugin_root: None,
     }])
     .await;
 
@@ -1065,6 +1194,7 @@ async fn respects_max_scan_depth_for_user_scope() {
             policy: None,
             path_to_skills_md: normalized(&within_depth_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -1092,6 +1222,7 @@ async fn loads_valid_skill() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -1124,12 +1255,13 @@ async fn falls_back_to_directory_name_when_skill_name_is_missing() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
 
 #[tokio::test]
-async fn namespaces_plugin_skills_using_plugin_name() {
+async fn namespaces_plugin_skills_using_provided_namespace() {
     let root = tempfile::tempdir().expect("tempdir");
     let plugin_root = root.path().join("plugins/sample");
     let skill_path = write_raw_skill_at(
@@ -1140,7 +1272,7 @@ async fn namespaces_plugin_skills_using_plugin_name() {
     fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
     fs::write(
         plugin_root.join(".codex-plugin/plugin.json"),
-        r#"{"name":"sample"}"#,
+        r#"{"name":"should-not-be-read"}"#,
     )
     .unwrap();
 
@@ -1148,6 +1280,9 @@ async fn namespaces_plugin_skills_using_plugin_name() {
         path: plugin_root.join("skills").abs(),
         scope: SkillScope::User,
         file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: Some("sample@test".to_string()),
+        plugin_namespace: Some("sample".to_string()),
+        plugin_root: Some(plugin_root.abs()),
     }])
     .await;
 
@@ -1167,7 +1302,88 @@ async fn namespaces_plugin_skills_using_plugin_name() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: Some("sample@test".to_string()),
         }]
+    );
+}
+
+#[tokio::test]
+async fn plugin_skill_name_length_limit_allows_max_qualified_name() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_name = "p".repeat(MAX_NAME_LEN - 1);
+    let skill_name = "s".repeat(MAX_NAME_LEN);
+    let plugin_root = root.path().join("plugins").join(&plugin_name);
+    let frontmatter = format!("name: {skill_name}\ndescription: search sample data");
+    let skill_path = write_raw_skill_at(&plugin_root.join("skills"), "sample-search", &frontmatter);
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        format!(r#"{{"name":"{plugin_name}"}}"#),
+    )
+    .unwrap();
+
+    let outcome = load_skills_from_roots([SkillRoot {
+        path: plugin_root.join("skills").abs(),
+        scope: SkillScope::User,
+        file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: Some("sample@test".to_string()),
+        plugin_namespace: Some(plugin_name.clone()),
+        plugin_root: Some(plugin_root.abs()),
+    }])
+    .await;
+
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: format!("{plugin_name}:{skill_name}"),
+            description: "search sample data".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: Some("sample@test".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn plugin_skill_name_length_limit_rejects_overlong_qualified_name() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let plugin_name = "p".repeat(MAX_NAME_LEN);
+    let skill_name = "s".repeat(MAX_NAME_LEN);
+    let plugin_root = root.path().join("plugins").join(&plugin_name);
+    let frontmatter = format!("name: {skill_name}\ndescription: search sample data");
+    write_raw_skill_at(&plugin_root.join("skills"), "sample-search", &frontmatter);
+    fs::create_dir_all(plugin_root.join(".codex-plugin")).unwrap();
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        format!(r#"{{"name":"{plugin_name}"}}"#),
+    )
+    .unwrap();
+
+    let outcome = load_skills_from_roots([SkillRoot {
+        path: plugin_root.join("skills").abs(),
+        scope: SkillScope::User,
+        file_system: Arc::clone(&LOCAL_FS),
+        plugin_id: Some("sample@test".to_string()),
+        plugin_namespace: Some(plugin_name.clone()),
+        plugin_root: Some(plugin_root.abs()),
+    }])
+    .await;
+
+    assert_eq!(outcome.skills, Vec::new());
+    assert_eq!(outcome.errors.len(), 1);
+    assert!(
+        outcome.errors[0].message.contains("invalid qualified name"),
+        "expected qualified name length error, got: {:?}",
+        outcome.errors
     );
 }
 
@@ -1198,6 +1414,135 @@ async fn loads_short_description_from_metadata() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::User,
+            plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn loads_unquoted_description_containing_colon_space() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "colon-description",
+        "name: colon-description\ndescription: AWS deployment patterns: ECS Fargate, Lambda, and S3",
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "colon-description".to_string(),
+            description: "AWS deployment patterns: ECS Fargate, Lambda, and S3".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn loads_unquoted_short_description_containing_colon_space_and_apostrophe() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "colon-short-description",
+        "name: colon-short-description\ndescription: long description\nmetadata:\n  short-description: What's included: builds and tests",
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "colon-short-description".to_string(),
+            description: "long description".to_string(),
+            short_description: Some("What's included: builds and tests".to_string()),
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn loads_unrecognized_frontmatter_fields_that_need_quotes() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "repaired-unknown-fields",
+        "name: repaired-unknown-fields\ndescription: valid description\nargument-hint: <duration: e.g. 7d, 2w>\ntags: [next,@supabase/ssr]",
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "repaired-unknown-fields".to_string(),
+            description: "valid description".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn preserves_block_scalar_body_while_repairing_other_fields() {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let skill_path = write_raw_skill_at(
+        &codex_home.path().join("skills"),
+        "block-description-with-repair",
+        "name: block-description-with-repair\ndescription: |-\n  Build for AWS: ECS\nargument-hint: <duration: e.g. 7d>",
+    );
+
+    let cfg = make_config(&codex_home).await;
+    let outcome = load_skills_for_test(&cfg).await;
+    assert!(
+        outcome.errors.is_empty(),
+        "unexpected errors: {:?}",
+        outcome.errors
+    );
+    assert_eq!(
+        outcome.skills,
+        vec![SkillMetadata {
+            name: "block-description-with-repair".to_string(),
+            description: "Build for AWS: ECS".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            path_to_skills_md: normalized(&skill_path),
+            scope: SkillScope::User,
+            plugin_id: None,
         }]
     );
 }
@@ -1310,6 +1655,7 @@ async fn loads_skills_from_repo_root() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
+            plugin_id: None,
         }]
     );
 }
@@ -1345,6 +1691,7 @@ async fn loads_skills_from_agents_dir_without_codex_dir() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
+            plugin_id: None,
         }]
     );
 }
@@ -1398,6 +1745,7 @@ async fn loads_skills_from_all_codex_dirs_under_project_root() {
                 policy: None,
                 path_to_skills_md: normalized(&nested_skill_path),
                 scope: SkillScope::Repo,
+                plugin_id: None,
             },
             SkillMetadata {
                 name: "root-skill".to_string(),
@@ -1408,6 +1756,7 @@ async fn loads_skills_from_all_codex_dirs_under_project_root() {
                 policy: None,
                 path_to_skills_md: normalized(&root_skill_path),
                 scope: SkillScope::Repo,
+                plugin_id: None,
             },
         ]
     );
@@ -1447,6 +1796,7 @@ async fn loads_skills_from_codex_dir_when_not_git_repo() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
+            plugin_id: None,
         }]
     );
 }
@@ -1462,11 +1812,17 @@ async fn deduplicates_by_path_preferring_first_root() {
             path: root.path().abs(),
             scope: SkillScope::Repo,
             file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
         },
         SkillRoot {
             path: root.path().abs(),
             scope: SkillScope::User,
             file_system: Arc::clone(&LOCAL_FS),
+            plugin_id: None,
+            plugin_namespace: None,
+            plugin_root: None,
         },
     ])
     .await;
@@ -1487,6 +1843,7 @@ async fn deduplicates_by_path_preferring_first_root() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
+            plugin_id: None,
         }]
     );
 }
@@ -1528,6 +1885,7 @@ async fn keeps_duplicate_names_from_repo_and_user() {
                 policy: None,
                 path_to_skills_md: normalized(&repo_skill_path),
                 scope: SkillScope::Repo,
+                plugin_id: None,
             },
             SkillMetadata {
                 name: "dupe-skill".to_string(),
@@ -1538,6 +1896,7 @@ async fn keeps_duplicate_names_from_repo_and_user() {
                 policy: None,
                 path_to_skills_md: normalized(&user_skill_path),
                 scope: SkillScope::User,
+                plugin_id: None,
             },
         ]
     );
@@ -1600,6 +1959,7 @@ async fn keeps_duplicate_names_from_nested_codex_dirs() {
                 policy: None,
                 path_to_skills_md: first_path,
                 scope: SkillScope::Repo,
+                plugin_id: None,
             },
             SkillMetadata {
                 name: "dupe-skill".to_string(),
@@ -1610,6 +1970,7 @@ async fn keeps_duplicate_names_from_nested_codex_dirs() {
                 policy: None,
                 path_to_skills_md: second_path,
                 scope: SkillScope::Repo,
+                plugin_id: None,
             },
         ]
     );
@@ -1681,6 +2042,7 @@ async fn loads_skills_when_cwd_is_file_in_repo() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::Repo,
+            plugin_id: None,
         }]
     );
 }
@@ -1739,6 +2101,7 @@ async fn loads_skills_from_system_cache_when_present() {
             policy: None,
             path_to_skills_md: normalized(&skill_path),
             scope: SkillScope::System,
+            plugin_id: None,
         }]
     );
 }
@@ -1752,6 +2115,7 @@ async fn skill_roots_include_admin_with_lowest_priority() {
         Some(Arc::clone(&LOCAL_FS)),
         &cfg.config_layer_stack,
         &cfg.cwd,
+        Vec::new(),
         Vec::new(),
     )
     .await

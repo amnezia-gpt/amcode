@@ -2,7 +2,7 @@
 
 use codex_features::Feature;
 use codex_protocol::config_types::WebSearchMode;
-use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::models::PermissionProfile;
 use core_test_support::responses;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -12,7 +12,6 @@ use serde_json::Value;
 use serde_json::json;
 use std::sync::Arc;
 
-#[allow(clippy::expect_used)]
 fn find_web_search_tool(body: &Value) -> &Value {
     body["tools"]
         .as_array()
@@ -44,9 +43,9 @@ async fn web_search_mode_cached_sets_external_web_access_false() {
         .await
         .expect("create test Codex conversation");
 
-    test.submit_turn_with_policy(
+    test.submit_turn_with_permission_profile(
         "hello cached web search",
-        SandboxPolicy::new_read_only_policy(),
+        PermissionProfile::read_only(),
     )
     .await
     .expect("submit turn");
@@ -86,9 +85,9 @@ async fn web_search_mode_takes_precedence_over_legacy_flags() {
         .await
         .expect("create test Codex conversation");
 
-    test.submit_turn_with_policy(
+    test.submit_turn_with_permission_profile(
         "hello cached+live flags",
-        SandboxPolicy::new_read_only_policy(),
+        PermissionProfile::read_only(),
     )
     .await
     .expect("submit turn");
@@ -132,9 +131,9 @@ async fn web_search_mode_defaults_to_cached_when_features_disabled() {
         .await
         .expect("create test Codex conversation");
 
-    test.submit_turn_with_policy(
+    test.submit_turn_with_permission_profile(
         "hello default cached web search",
-        SandboxPolicy::new_read_only_policy(),
+        PermissionProfile::read_only(),
     )
     .await
     .expect("submit turn");
@@ -149,7 +148,7 @@ async fn web_search_mode_defaults_to_cached_when_features_disabled() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn web_search_mode_updates_between_turns_with_sandbox_policy() {
+async fn web_search_mode_updates_between_turns_with_permission_profile() {
     skip_if_no_network!();
 
     let server = start_mock_server().await;
@@ -187,10 +186,10 @@ async fn web_search_mode_updates_between_turns_with_sandbox_policy() {
         .await
         .expect("create test Codex conversation");
 
-    test.submit_turn_with_policy("hello cached", SandboxPolicy::new_read_only_policy())
+    test.submit_turn_with_permission_profile("hello cached", PermissionProfile::read_only())
         .await
         .expect("submit first turn");
-    test.submit_turn_with_policy("hello live", SandboxPolicy::DangerFullAccess)
+    test.submit_turn_with_permission_profile("hello live", PermissionProfile::Disabled)
         .await
         .expect("submit second turn");
 
@@ -248,9 +247,9 @@ location = { country = "US", city = "New York", timezone = "America/New_York" }
         .await
         .expect("create test Codex conversation");
 
-    test.submit_turn_with_policy(
+    test.submit_turn_with_permission_profile(
         "hello configured web search",
-        SandboxPolicy::DangerFullAccess,
+        PermissionProfile::Disabled,
     )
     .await
     .expect("submit turn");

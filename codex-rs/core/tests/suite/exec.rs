@@ -9,7 +9,6 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::Result;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::PermissionProfile;
-use codex_protocol::protocol::SandboxPolicy;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::get_platform_sandbox;
 use core_test_support::PathExt;
@@ -25,7 +24,6 @@ fn skip_test() -> bool {
     false
 }
 
-#[expect(clippy::expect_used)]
 async fn run_test_cmd<I, S>(tmp: TempDir, command: I) -> Result<ExecToolCallOutput>
 where
     I: IntoIterator<Item = S>,
@@ -43,6 +41,7 @@ where
         capture_policy: ExecCapturePolicy::ShellTool,
         env: HashMap::new(),
         network: None,
+        network_environment_id: None,
         sandbox_permissions: SandboxPermissions::UseDefault,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
         windows_sandbox_private_desktop: false,
@@ -50,13 +49,11 @@ where
         arg0: None,
     };
 
-    let policy = SandboxPolicy::new_read_only_policy();
-    let permission_profile = PermissionProfile::from_legacy_sandbox_policy(&policy);
-
     process_exec_tool_call(
         params,
-        &permission_profile,
+        &PermissionProfile::read_only(),
         &cwd,
+        std::slice::from_ref(&cwd),
         &None,
         /*use_legacy_landlock*/ false,
         /*stdout_stream*/ None,

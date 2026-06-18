@@ -1,5 +1,5 @@
-use crate::OPENAI_CURATED_MARKETPLACE_NAME;
 use crate::installed_marketplaces::marketplace_install_root;
+use crate::is_openai_curated_marketplace_name;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use std::fs;
 use std::path::Path;
@@ -121,16 +121,14 @@ where
 
     if let MarketplaceSource::Local { path } = &source {
         let marketplace_name = validate_marketplace_source_root(path)?;
-        if marketplace_name == OPENAI_CURATED_MARKETPLACE_NAME {
+        if is_openai_curated_marketplace_name(&marketplace_name) {
             return Err(MarketplaceAddError::InvalidRequest(format!(
-                "marketplace '{OPENAI_CURATED_MARKETPLACE_NAME}' is reserved and cannot be added from {}",
-                source.display()
+                "marketplace '{marketplace_name}' is reserved and cannot be added from this source"
             )));
         }
         if find_marketplace_root_by_name(codex_home, &install_root, &marketplace_name)?.is_some() {
             return Err(MarketplaceAddError::InvalidRequest(format!(
-                "marketplace '{marketplace_name}' is already added from a different source; remove it before adding {}",
-                source.display()
+                "marketplace '{marketplace_name}' is already added from a different source; remove it before adding this source"
             )));
         }
         record_added_marketplace_entry(codex_home, &marketplace_name, &install_metadata)?;
@@ -167,10 +165,9 @@ where
     stage_marketplace_source(&source, &sparse_paths, &staged_root, clone_source)?;
 
     let marketplace_name = validate_marketplace_source_root(&staged_root)?;
-    if marketplace_name == OPENAI_CURATED_MARKETPLACE_NAME {
+    if is_openai_curated_marketplace_name(&marketplace_name) {
         return Err(MarketplaceAddError::InvalidRequest(format!(
-            "marketplace '{OPENAI_CURATED_MARKETPLACE_NAME}' is reserved and cannot be added from {}",
-            source.display()
+            "marketplace '{marketplace_name}' is reserved and cannot be added from this source"
         )));
     }
 
@@ -178,8 +175,7 @@ where
     ensure_marketplace_destination_is_inside_install_root(&install_root, &destination)?;
     if destination.exists() {
         return Err(MarketplaceAddError::InvalidRequest(format!(
-            "marketplace '{marketplace_name}' is already added from a different source; remove it before adding {}",
-            source.display()
+            "marketplace '{marketplace_name}' is already added from a different source; remove it before adding this source"
         )));
     }
 
