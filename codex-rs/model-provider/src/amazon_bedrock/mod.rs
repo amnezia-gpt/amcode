@@ -1,10 +1,12 @@
 mod auth;
 mod catalog;
+mod error;
 mod mantle;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use codex_api::ApiError;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
@@ -17,6 +19,7 @@ use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::AmazonBedrockCredentialSource;
 use codex_protocol::account::ProviderAccount;
+use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result;
 use codex_protocol::openai_models::ModelsResponse;
 
@@ -28,6 +31,7 @@ use crate::provider::ProviderCapabilities;
 use auth::resolve_provider_auth;
 pub(crate) use catalog::static_model_catalog;
 use catalog::with_default_only_service_tier;
+pub use mantle::is_supported_amazon_bedrock_region;
 use mantle::runtime_base_url;
 
 /// Runtime provider for Amazon Bedrock's OpenAI-compatible Mantle endpoint.
@@ -66,6 +70,7 @@ impl AmazonBedrockModelProvider {
                 CodexAuth::ApiKey(_)
                 | CodexAuth::Chatgpt(_)
                 | CodexAuth::ChatgptAuthTokens(_)
+                | CodexAuth::Headers(_)
                 | CodexAuth::AgentIdentity(_)
                 | CodexAuth::PersonalAccessToken(_) => None,
             })
@@ -142,6 +147,10 @@ impl ModelProvider for AmazonBedrockModelProvider {
         })
     }
 
+    fn map_api_error(&self, error: ApiError) -> CodexErr {
+        error::map_api_error(error)
+    }
+
     fn api_provider(&self) -> ModelProviderFuture<'_, Result<Provider>> {
         Box::pin(AmazonBedrockModelProvider::api_provider(self))
     }
@@ -164,7 +173,21 @@ impl ModelProvider for AmazonBedrockModelProvider {
             config_model_catalog.map_or_else(static_model_catalog, with_default_only_service_tier),
         ))
     }
+
+    fn models_manager_without_cache(
+        &self,
+        config_model_catalog: Option<ModelsResponse>,
+    ) -> SharedModelsManager {
+        Arc::new(StaticModelsManager::new(
+            /*auth_manager*/ None,
+            config_model_catalog.map_or_else(static_model_catalog, with_default_only_service_tier),
+        ))
+    }
 }
+
+#[cfg(test)]
+#[path = "error_tests.rs"]
+mod error_tests;
 
 #[cfg(test)]
 mod tests {
