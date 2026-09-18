@@ -176,6 +176,7 @@ mod tests {
 
     fn exec_approval(call_id: &str, approval_id: Option<&str>) -> ExecApprovalRequestEvent {
         ExecApprovalRequestEvent {
+            kind: Default::default(),
             call_id: call_id.to_string(),
             approval_id: approval_id.map(str::to_string),
             turn_id: "turn".to_string(),
@@ -193,6 +194,7 @@ mod tests {
 
     fn command_execution(call_id: &str) -> ThreadItem {
         ThreadItem::CommandExecution {
+            model_context: None,
             id: call_id.to_string(),
             command: "true".to_string(),
             cwd: AbsolutePathBuf::current_dir().expect("current dir").into(),

@@ -57,7 +57,9 @@ pub enum TelemetryAuthMode {
 impl From<AuthMode> for TelemetryAuthMode {
     fn from(mode: AuthMode) -> Self {
         match mode {
-            AuthMode::ApiKey | AuthMode::BedrockApiKey => Self::ApiKey,
+            AuthMode::ApiKey | AuthMode::BedrockApiKey | AuthMode::BedrockAccessKeys => {
+                Self::ApiKey
+            }
             AuthMode::Chatgpt
             | AuthMode::ChatgptAuthTokens
             | AuthMode::Headers
@@ -65,6 +67,15 @@ impl From<AuthMode> for TelemetryAuthMode {
             | AuthMode::PersonalAccessToken => Self::Chatgpt,
         }
     }
+}
+
+/// Install externally managed, non-Statsig process-global metrics.
+///
+/// Call this once during single-threaded startup, before any instruments are
+/// registered. Keep the returned handle to flush and shut down the exporter
+/// owned by this installation.
+pub fn install_global_metrics(metrics: MetricsClient) -> MetricsClient {
+    crate::metrics::install_global(metrics)
 }
 
 /// Start a metrics timer using the globally installed metrics client.

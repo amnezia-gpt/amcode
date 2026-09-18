@@ -23,6 +23,7 @@ use crate::metrics::STARTUP_PHASE_DURATION_METRIC;
 use crate::metrics::SessionMetricTagValues;
 use crate::metrics::TOOL_CALL_COUNT_METRIC;
 use crate::metrics::TOOL_CALL_DURATION_METRIC;
+use crate::metrics::TURN_COST_MICROUSD_METRIC;
 use crate::metrics::TURN_TTFT_DURATION_METRIC;
 use crate::metrics::WEBSOCKET_EVENT_COUNT_METRIC;
 use crate::metrics::WEBSOCKET_EVENT_DURATION_METRIC;
@@ -204,6 +205,29 @@ impl SessionTelemetry {
         }
     }
 
+    /// Records a histogram with explicit buckets and the usual session attribution.
+    /// All callers of the same metric name must use the same boundaries.
+    pub fn histogram_with_boundaries(
+        &self,
+        name: &str,
+        value: i64,
+        boundaries: &[f64],
+        tags: &[(&str, &str)],
+    ) {
+        let res: MetricsResult<()> = (|| {
+            let Some(metrics) = &self.metrics else {
+                return Ok(());
+            };
+
+            let tags = self.tags_with_metadata(tags)?;
+            metrics.histogram_with_boundaries(name, value, boundaries, &tags)
+        })();
+
+        if let Err(e) = res {
+            tracing::warn!("metrics histogram [{name}] failed: {e}");
+        }
+    }
+
     pub fn record_duration(&self, name: &str, duration: Duration, tags: &[(&str, &str)]) {
         let res: MetricsResult<()> = (|| {
             let Some(metrics) = &self.metrics else {
@@ -281,6 +305,45 @@ impl SessionTelemetry {
         speed: Option<&str>,
         reasoning_effort: Option<&str>,
     ) {
+        let (dollars, fractional) = estimated_usd.split_once('.').unwrap_or((estimated_usd, ""));
+        let fractional = fractional.as_bytes();
+        let fractional_precision = 6_usize;
+        let estimated_microusd = dollars.parse::<u64>().ok().and_then(|dollars| {
+            if !fractional.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            let fractional_microusd = fractional
+                .iter()
+                .take(fractional_precision)
+                .fold(0_u64, |value, digit| value * 10 + u64::from(digit - b'0'))
+                * 10_u64.pow(fractional_precision.saturating_sub(fractional.len()) as u32);
+            let round_up = fractional
+                .get(fractional_precision)
+                .is_some_and(|digit| *digit >= b'5');
+            let estimated_microusd = dollars
+                .checked_mul(1_000_000)?
+                .checked_add(fractional_microusd)?
+                .checked_add(u64::from(round_up))?;
+            i64::try_from(estimated_microusd).ok()
+        });
+        if let Some(estimated_microusd) = estimated_microusd {
+            let conversation_id = self.metadata.conversation_id.to_string();
+            let mut tags = vec![
+                ("turn.id", turn_id),
+                ("conversation.id", conversation_id.as_str()),
+                (
+                    "turn.interrupted",
+                    if interrupted { "true" } else { "false" },
+                ),
+            ];
+            if let Some(speed) = speed {
+                tags.push(("speed", speed));
+            }
+            if let Some(reasoning_effort) = reasoning_effort {
+                tags.push(("reasoning_effort", reasoning_effort));
+            }
+            self.counter(TURN_COST_MICROUSD_METRIC, estimated_microusd, &tags);
+        }
         log_event!(
             self,
             event.name = "codex.turn_cost",
@@ -1230,7 +1293,7 @@ impl SessionTelemetry {
 
     fn responses_type(event: &ResponseEvent) -> String {
         match event {
-            ResponseEvent::Created => "created".into(),
+            ResponseEvent::Created { .. } => "created".into(),
             ResponseEvent::OutputItemDone(item) | ResponseEvent::OutputItemAdded(item) => {
                 SessionTelemetry::responses_item_type(item)
             }
@@ -1269,6 +1332,7 @@ impl SessionTelemetry {
             ResponseItem::WebSearchCall { .. } => "web_search_call".into(),
             ResponseItem::ImageGenerationCall { .. } => "image_generation_call".into(),
             ResponseItem::Compaction { .. } => "compaction".into(),
+            ResponseItem::ConfigurationUpdate { .. } => "configuration_update".into(),
             ResponseItem::CompactionTrigger { .. } => "compaction_trigger".into(),
             ResponseItem::ContextCompaction { .. } => "context_compaction".into(),
             ResponseItem::Other => "other".into(),

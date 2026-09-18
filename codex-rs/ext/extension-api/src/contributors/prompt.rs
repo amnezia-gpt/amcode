@@ -1,11 +1,15 @@
 // All this file should be replaced by the existing fragment implementation ofc
 
+use codex_context_fragments::AnnotatedContent;
+use codex_context_fragments::RenderedFragment;
 use codex_protocol::models::ContentItemKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PromptSlot {
     DeveloperPolicy,
     DeveloperCapabilities,
+    /// Text inside the context-window message, supplied by `contribute_thread_context`.
+    ContextWindow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,5 +52,14 @@ impl PromptFragment {
     /// Returns the producer-owned classification of the model-visible text.
     pub fn content_kind(&self) -> &ContentItemKind {
         &self.content_kind
+    }
+}
+
+impl From<PromptFragment> for RenderedFragment {
+    fn from(fragment: PromptFragment) -> Self {
+        Self::new(
+            "developer",
+            AnnotatedContent::input_text(fragment.text, fragment.content_kind),
+        )
     }
 }

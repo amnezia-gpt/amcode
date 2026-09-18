@@ -26,6 +26,7 @@ use tokio_stream::StreamExt;
 pub(crate) enum UnarchiveChoice {
     Unarchive,
     Cancel,
+    Quit,
 }
 
 pub(crate) async fn run_unarchive_prompt(
@@ -41,10 +42,10 @@ pub(crate) async fn run_unarchive_prompt(
         .discard_pending_input_before_interactive_screen()?;
     let events = guard.tui.event_stream();
     tokio::pin!(events);
+    guard.draw(&screen)?;
     loop {
-        guard.draw(&screen)?;
         let Some(event) = events.next().await else {
-            return Ok(UnarchiveChoice::Cancel);
+            return Ok(UnarchiveChoice::Quit);
         };
         guard.tui.screen_size_for_event(&event)?;
         match event {
@@ -53,8 +54,14 @@ pub(crate) async fn run_unarchive_prompt(
                     return Ok(choice);
                 }
             }
-            TuiEvent::Paste(_) | TuiEvent::Draw | TuiEvent::Resize(_) | TuiEvent::Resume => {}
+            TuiEvent::Paste(_)
+            | TuiEvent::Draw
+            | TuiEvent::Resize(_)
+            | TuiEvent::Resume
+            | TuiEvent::FocusGained => {}
+            TuiEvent::FocusLost => continue,
         }
+        guard.draw(&screen)?;
     }
 }
 
@@ -134,13 +141,13 @@ impl UnarchivePrompt {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('d'))
         {
-            return Some(UnarchiveChoice::Cancel);
+            return Some(UnarchiveChoice::Quit);
         }
         match key.code {
             KeyCode::Up | KeyCode::Down | KeyCode::Char('k' | 'j') => {
                 self.highlighted = match self.highlighted {
                     UnarchiveChoice::Unarchive => UnarchiveChoice::Cancel,
-                    UnarchiveChoice::Cancel => UnarchiveChoice::Unarchive,
+                    UnarchiveChoice::Cancel | UnarchiveChoice::Quit => UnarchiveChoice::Unarchive,
                 };
                 None
             }

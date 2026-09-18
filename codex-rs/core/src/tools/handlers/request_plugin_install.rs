@@ -82,7 +82,10 @@ impl ToolExecutor<ToolInvocation> for RequestPluginInstallHandler {
         false
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(self.handle_call(invocation))
     }
 }
@@ -110,6 +113,12 @@ impl RequestPluginInstallHandler {
                 )));
             }
         };
+
+        if turn.session_source.is_non_root_agent() {
+            return Err(FunctionCallError::RespondToModel(
+                "request_plugin_install can only be used by the root thread".to_string(),
+            ));
+        }
 
         let (requested_tool_id, requested_tool_type, suggest_reason) = match self.presentation {
             ToolSuggestPresentation::ListTool => {
@@ -217,7 +226,7 @@ impl RequestPluginInstallHandler {
                 .analytics_events_client
                 .track_plugin_install_requested(
                     build_track_events_context(
-                        turn.model_info.slug.clone(),
+                        step_context.settings.model_info.slug.clone(),
                         session.thread_id.to_string(),
                         turn.sub_id.clone(),
                         turn.originator.clone(),
@@ -245,7 +254,8 @@ impl RequestPluginInstallHandler {
                 request_id,
                 request,
             )
-            .await;
+            .await
+            .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
         let response = elicitation.response;
         if let Some(response) = response.as_ref() {
             maybe_persist_disabled_install_request(&session, &turn, &tool, response).await;
@@ -280,14 +290,16 @@ impl RequestPluginInstallHandler {
                 Some(_) => "unknown",
                 None => "unavailable",
             };
-            turn.session_telemetry.record_plugin_install_suggestion(
-                tool_type,
-                tool.id(),
-                tool.name(),
-                response_action,
-                user_confirmed,
-                completed,
-            );
+            step_context
+                .session_telemetry
+                .record_plugin_install_suggestion(
+                    tool_type,
+                    tool.id(),
+                    tool.name(),
+                    response_action,
+                    user_confirmed,
+                    completed,
+                );
         }
 
         let content = serde_json::to_string(&RequestPluginInstallResult {
