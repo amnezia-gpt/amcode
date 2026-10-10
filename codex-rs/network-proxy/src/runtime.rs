@@ -3,6 +3,7 @@ use crate::config::NetworkMode;
 use crate::config::NetworkProxyConfig;
 use crate::config::ValidatedUnixSocketPath;
 use crate::credential_broker::CredentialBroker;
+use crate::domain_matcher::DomainPatternSet;
 use crate::mitm::MitmState;
 use crate::mitm_hook::HookEvaluation;
 use crate::mitm_hook::MitmHooksByHost;
@@ -23,7 +24,6 @@ use crate::state::validate_policy_against_constraints;
 use anyhow::Context;
 use anyhow::Result;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use globset::GlobSet;
 use opentelemetry::trace::SpanContext;
 use serde::Deserialize;
 use serde::Serialize;
@@ -85,6 +85,12 @@ impl std::fmt::Display for HostBlockReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HostAuthorization {
+    RequireAllowlist,
+    Approved,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,8 +178,8 @@ pub struct ConfigState {
     pub(crate) executor_os: crate::Platform,
     pub config: NetworkProxyConfig,
     pub(crate) brokerage_created_default_allowlist: bool,
-    pub allow_set: GlobSet,
-    pub deny_set: GlobSet,
+    pub allow_set: DomainPatternSet,
+    pub deny_set: DomainPatternSet,
     pub mitm: Option<Arc<MitmState>>,
     pub mitm_hooks: MitmHooksByHost,
     pub constraints: NetworkProxyConstraints,
@@ -232,8 +238,37 @@ where
     }
 }
 
+/// How the executor resolves and validates local binding when managed networking is enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LocalBindingPolicy {
+    /// Omission defaults to false; either explicit value is accepted.
+    #[default]
+    DefaultFalse,
+    /// Omission defaults to true; explicit false is rejected.
+    RequireTrue,
+}
+
+impl LocalBindingPolicy {
+    /// Resolves omission without changing the configured value.
+    pub fn resolve(self, config: &NetworkProxyConfig) -> bool {
+        config
+            .allow_local_binding
+            .unwrap_or(config.enabled && self == Self::RequireTrue)
+    }
+
+    pub(crate) fn resolved_config(self, config: &NetworkProxyConfig) -> NetworkProxyConfig {
+        NetworkProxyConfig {
+            allow_local_binding: Some(self.resolve(config)),
+            ..config.clone()
+        }
+    }
+}
+
 pub struct NetworkProxyState {
     state: Arc<RwLock<ConfigState>>,
+    /// Belongs to this proxy; config retains omission for launches on other executors.
+    pub(crate) local_binding_policy: LocalBindingPolicy,
+    pub(crate) proxy_private_ips_via_upstream: bool,
     reloader: Arc<dyn ConfigReloader>,
     blocked_request_observer: Arc<RwLock<Option<Arc<dyn BlockedRequestObserver>>>>,
     pub(crate) policy_audit_observer: Option<NetworkPolicyAuditObserver>,
@@ -261,7 +296,7 @@ struct ExecutionAttribution {
 
 impl std::fmt::Debug for NetworkProxyState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Avoid logging internal state (config contents, derived globsets, etc.) which can be noisy
+        // Avoid logging internal state (config contents, compiled domain patterns, etc.) which can be noisy
         // and may contain sensitive paths.
         f.debug_struct("NetworkProxyState").finish_non_exhaustive()
     }
@@ -271,6 +306,8 @@ impl Clone for NetworkProxyState {
     fn clone(&self) -> Self {
         Self {
             state: self.state.clone(),
+            local_binding_policy: self.local_binding_policy,
+            proxy_private_ips_via_upstream: self.proxy_private_ips_via_upstream,
             reloader: self.reloader.clone(),
             blocked_request_observer: self.blocked_request_observer.clone(),
             policy_audit_observer: self.policy_audit_observer.clone(),
@@ -286,6 +323,12 @@ impl Clone for NetworkProxyState {
 }
 
 impl NetworkProxyState {
+    /// Selects routing for permitted private IPs without changing destination policy.
+    /// Set by the execution host, independently of reloadable or remote policy.
+    pub fn set_proxy_private_ips_via_upstream(&mut self, enabled: bool) {
+        self.proxy_private_ips_via_upstream = enabled;
+    }
+
     /// Builds runtime state for one executor-local proxy launch.
     /// The launching executor supplies its own OS; the wire policy cannot override it.
     pub fn from_remote_launch_config(
@@ -312,6 +355,7 @@ impl NetworkProxyState {
                 state,
                 Arc::new(StaticConfigReloader),
                 audit_metadata,
+                LocalBindingPolicy::DefaultFalse,
             )
         })
     }
@@ -321,6 +365,7 @@ impl NetworkProxyState {
             state,
             reloader,
             NetworkProxyAuditMetadata::default(),
+            LocalBindingPolicy::DefaultFalse,
         )
     }
 
@@ -333,6 +378,7 @@ impl NetworkProxyState {
             state,
             reloader,
             NetworkProxyAuditMetadata::default(),
+            LocalBindingPolicy::DefaultFalse,
             blocked_request_observer,
         )
     }
@@ -341,11 +387,13 @@ impl NetworkProxyState {
         state: ConfigState,
         reloader: Arc<dyn ConfigReloader>,
         audit_metadata: NetworkProxyAuditMetadata,
+        local_binding_policy: LocalBindingPolicy,
     ) -> Self {
         Self::with_reloader_and_audit_metadata_and_blocked_observer(
             state,
             reloader,
             audit_metadata,
+            local_binding_policy,
             /*blocked_request_observer*/ None,
         )
     }
@@ -354,13 +402,16 @@ impl NetworkProxyState {
         state: ConfigState,
         reloader: Arc<dyn ConfigReloader>,
         audit_metadata: NetworkProxyAuditMetadata,
+        local_binding_policy: LocalBindingPolicy,
         blocked_request_observer: Option<Arc<dyn BlockedRequestObserver>>,
     ) -> Self {
         let credential_broker = CredentialBroker::new(state.config.credential_broker);
-        credential_broker.configure(&state.config);
+        credential_broker.configure(&local_binding_policy.resolved_config(&state.config));
         Self {
             credential_broker,
             state: Arc::new(RwLock::new(state)),
+            local_binding_policy,
+            proxy_private_ips_via_upstream: false,
             reloader,
             blocked_request_observer: Arc::new(RwLock::new(blocked_request_observer)),
             policy_audit_observer: None,
@@ -616,7 +667,8 @@ impl NetworkProxyState {
             Ok(mut new_state) => {
                 {
                     let mut guard = self.state.write().await;
-                    self.credential_broker.configure(&new_state.config);
+                    self.credential_broker
+                        .configure(&self.local_binding_policy.resolved_config(&new_state.config));
                     // Log policy diffs without dumping potentially sensitive config values.
                     log_policy_changes(&guard.config, &new_state.config);
                     new_state.blocked = guard.blocked.clone();
@@ -637,7 +689,8 @@ impl NetworkProxyState {
     pub async fn replace_config_state(&self, mut new_state: ConfigState) -> Result<()> {
         self.reload_if_needed().await?;
         let mut guard = self.state.write().await;
-        self.credential_broker.configure(&new_state.config);
+        self.credential_broker
+            .configure(&self.local_binding_policy.resolved_config(&new_state.config));
         log_policy_changes(&guard.config, &new_state.config);
         new_state.blocked = guard.blocked.clone();
         new_state.blocked_total = guard.blocked_total;
@@ -647,6 +700,48 @@ impl NetworkProxyState {
     }
 
     pub async fn host_blocked(&self, host: &str, port: u16) -> Result<HostBlockDecision> {
+        self.host_blocked_with_local_binding(
+            host,
+            port,
+            /*allow_local_binding*/ None,
+            HostAuthorization::RequireAllowlist,
+        )
+        .await
+    }
+
+    pub(crate) async fn host_blocked_with_local_binding(
+        &self,
+        host: &str,
+        port: u16,
+        allow_local_binding: Option<bool>,
+        authorization: HostAuthorization,
+    ) -> Result<HostBlockDecision> {
+        self.host_blocked_with_lookup(
+            host,
+            port,
+            allow_local_binding,
+            authorization,
+            |host, port| async move {
+                lookup_host((host.as_str(), port))
+                    .await
+                    .map(Iterator::collect)
+            },
+        )
+        .await
+    }
+
+    async fn host_blocked_with_lookup<F, Fut>(
+        &self,
+        host: &str,
+        port: u16,
+        allow_local_binding: Option<bool>,
+        authorization: HostAuthorization,
+        lookup: F,
+    ) -> Result<HostBlockDecision>
+    where
+        F: FnOnce(String, u16) -> Fut,
+        Fut: Future<Output = std::io::Result<Vec<SocketAddr>>>,
+    {
         self.reload_if_needed().await?;
         let host = match Host::parse(host) {
             Ok(host) => host,
@@ -658,11 +753,13 @@ impl NetworkProxyState {
             (
                 guard.deny_set.clone(),
                 guard.allow_set.clone(),
-                guard.config.allow_local_binding,
+                // Keep explicit controller restrictions even if the executor launched with true.
+                allow_local_binding
+                    .unwrap_or_else(|| self.local_binding_policy.resolve(&guard.config))
+                    && guard.config.allow_local_binding != Some(false),
                 allowed_domains,
             )
         };
-        let allowed_domains_empty = allowed_domains.is_none();
         let allowed_domains = allowed_domains.unwrap_or_default();
 
         let host_str = host.as_str();
@@ -670,12 +767,13 @@ impl NetworkProxyState {
         // Decision order matters:
         //  1) explicit deny always wins
         //  2) local/private networking is opt-in (defense-in-depth)
-        //  3) allowlist is enforced when configured
-        if globset_matches_host_or_unscoped(&deny_set, host_str) {
+        //  3) DNS requires an allowlist match or an approval
+        if domains_match_host_or_unscoped(&deny_set, host_str) {
             return Ok(HostBlockDecision::Blocked(HostBlockReason::Denied));
         }
 
-        let is_allowlisted = globset_matches_host_or_unscoped(&allow_set, host_str);
+        let is_authorized = authorization == HostAuthorization::Approved
+            || domains_match_host_or_unscoped(&allow_set, host_str);
         if !allow_local_binding {
             // If the intent is "prevent access to local/internal networks", we must not rely solely
             // on string checks like `localhost` / `127.0.0.1`. Attackers can use DNS rebinding or
@@ -700,23 +798,14 @@ impl NetworkProxyState {
                 if !is_explicit_local_allowlisted(&allowed_domains, &host) {
                     return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
                 }
-            } else if host_resolves_to_non_public_ip(
-                host_str,
-                port,
-                DNS_LOOKUP_TIMEOUT,
-                |host, port| async move {
-                    lookup_host((host.as_str(), port))
-                        .await
-                        .map(Iterator::collect)
-                },
-            )
-            .await
+            } else if is_authorized
+                && host_resolves_to_non_public_ip(host_str, port, DNS_LOOKUP_TIMEOUT, lookup).await
             {
                 return Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowedLocal));
             }
         }
 
-        if allowed_domains_empty || !is_allowlisted {
+        if !is_authorized {
             Ok(HostBlockDecision::Blocked(HostBlockReason::NotAllowed))
         } else {
             Ok(HostBlockDecision::Allowed)
@@ -848,7 +937,7 @@ impl NetworkProxyState {
     pub async fn allow_local_binding(&self) -> Result<bool> {
         self.reload_if_needed().await?;
         let guard = self.state.read().await;
-        Ok(guard.config.allow_local_binding)
+        Ok(self.local_binding_policy.resolve(&guard.config))
     }
 
     pub async fn network_mode(&self) -> Result<NetworkMode> {
@@ -867,7 +956,8 @@ impl NetworkProxyState {
                 (candidate, guard.constraints.clone())
             };
 
-            validate_policy_against_constraints(&candidate, &constraints)
+            let resolved = self.local_binding_policy.resolved_config(&candidate);
+            validate_policy_against_constraints(&resolved, &constraints)
                 .map_err(NetworkProxyConstraintError::into_anyhow)
                 .context("network.mode constrained by managed config")?;
 
@@ -892,10 +982,31 @@ impl NetworkProxyState {
         &self,
         host: &str,
         req: &rama_http::Request,
+        credential_destinations: &[String],
     ) -> Result<HookEvaluation> {
         self.reload_if_needed().await?;
-        let guard = self.state.read().await;
-        Ok(evaluate_mitm_hooks(&guard.mitm_hooks, host, req))
+        let hooked_hosts = {
+            let guard = self.state.read().await;
+            match evaluate_mitm_hooks(&guard.mitm_hooks, host, req) {
+                HookEvaluation::NoHooksForHost if !guard.mitm_hooks.is_empty() => {
+                    guard.mitm_hooks.keys().cloned().collect::<Vec<_>>()
+                }
+                evaluation => return Ok(evaluation),
+            }
+        };
+
+        if credential_destinations.iter().any(|destination| {
+            self.credential_broker.request_matches_hooked_host_alias(
+                destination,
+                req.headers(),
+                &hooked_hosts,
+                self.environment_id(),
+            )
+        }) {
+            Ok(HookEvaluation::HookedHostNoMatch)
+        } else {
+            Ok(HookEvaluation::NoHooksForHost)
+        }
     }
 
     pub(crate) async fn host_mitm_requirement(
@@ -969,7 +1080,8 @@ impl NetworkProxyState {
                 normalize_host,
             );
 
-            validate_policy_against_constraints(&candidate, &constraints)
+            let resolved = self.local_binding_policy.resolved_config(&candidate);
+            validate_policy_against_constraints(&resolved, &constraints)
                 .map_err(NetworkProxyConstraintError::into_anyhow)
                 .with_context(|| format!("{constraint_field} constrained by managed config"))?;
 
@@ -1001,7 +1113,8 @@ impl NetworkProxyState {
             Some(mut new_state) => {
                 {
                     let mut guard = self.state.write().await;
-                    self.credential_broker.configure(&new_state.config);
+                    self.credential_broker
+                        .configure(&self.local_binding_policy.resolved_config(&new_state.config));
                     log_policy_changes(&guard.config, &new_state.config);
                     new_state.blocked = guard.blocked.clone();
                     new_state.blocked_total = guard.blocked_total;
@@ -1152,7 +1265,7 @@ fn log_domain_list_changes(list_name: &str, previous: &[String], next: &[String]
     }
 }
 
-fn globset_matches_host_or_unscoped(set: &GlobSet, host: &str) -> bool {
+fn domains_match_host_or_unscoped(set: &DomainPatternSet, host: &str) -> bool {
     set.is_match(host) || unscoped_ip_literal(host).is_some_and(|ip| set.is_match(ip))
 }
 
@@ -1189,18 +1302,14 @@ pub(crate) fn network_proxy_state_for_policy(
     }
     let state = ConfigState {
         executor_os: crate::Platform::native(),
-        allow_set: crate::policy::compile_allowlist_globset(
-            &config.allowed_domains().unwrap_or_default(),
-        )
-        .unwrap(),
+        allow_set: crate::policy::compile_allowlist(&config.allowed_domains().unwrap_or_default())
+            .unwrap(),
         blocked: VecDeque::new(),
         blocked_total: 0,
         brokerage_created_default_allowlist,
         constraints: NetworkProxyConstraints::default(),
-        deny_set: crate::policy::compile_denylist_globset(
-            &config.denied_domains().unwrap_or_default(),
-        )
-        .unwrap(),
+        deny_set: crate::policy::compile_denylist(&config.denied_domains().unwrap_or_default())
+            .unwrap(),
         mitm: None,
         mitm_hooks: crate::mitm_hook::compile_mitm_hooks(&config).unwrap(),
         config,
@@ -1232,8 +1341,8 @@ mod tests {
     use super::*;
 
     use crate::config::NetworkProxyConfig;
-    use crate::policy::compile_allowlist_globset;
-    use crate::policy::compile_denylist_globset;
+    use crate::policy::compile_allowlist;
+    use crate::policy::compile_denylist;
     use crate::state::NetworkProxyConstraints;
     use crate::state::build_config_state;
     use crate::state::validate_policy_against_constraints;
@@ -1733,7 +1842,7 @@ mod tests {
     #[tokio::test]
     async fn host_blocked_requires_exact_scoped_ipv6_allowlist_match() {
         let state = network_proxy_state_for_policy(NetworkProxyConfig {
-            allow_local_binding: true,
+            allow_local_binding: Some(true),
             ..network_settings(&["fe80::1%eth0"], &[])
         });
 
@@ -1756,7 +1865,7 @@ mod tests {
     #[tokio::test]
     async fn host_blocked_denies_scoped_ipv6_literal_before_local_binding() {
         let state = network_proxy_state_for_policy(NetworkProxyConfig {
-            allow_local_binding: true,
+            allow_local_binding: Some(true),
             ..network_settings(&["*"], &["fd00::1"])
         });
 
@@ -1772,7 +1881,7 @@ mod tests {
     #[tokio::test]
     async fn host_blocked_requires_exact_scoped_ipv6_denylist_match() {
         let state = network_proxy_state_for_policy(NetworkProxyConfig {
-            allow_local_binding: true,
+            allow_local_binding: Some(true),
             ..network_settings(&["*"], &["fd00::1%eth0"])
         });
 
@@ -2049,7 +2158,7 @@ mod tests {
 
         let config = NetworkProxyConfig {
             enabled: true,
-            allow_local_binding: true,
+            allow_local_binding: Some(true),
             ..NetworkProxyConfig::default()
         };
 
@@ -2122,7 +2231,7 @@ mod tests {
     #[test]
     fn compile_globset_is_case_insensitive() {
         let patterns = vec!["ExAmPle.CoM".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("example.com"));
         assert!(set.is_match("EXAMPLE.COM"));
     }
@@ -2130,7 +2239,7 @@ mod tests {
     #[test]
     fn compile_globset_excludes_apex_for_subdomain_patterns() {
         let patterns = vec!["*.openai.com".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("api.openai.com"));
         assert!(!set.is_match("openai.com"));
         assert!(!set.is_match("evilopenai.com"));
@@ -2139,7 +2248,7 @@ mod tests {
     #[test]
     fn compile_globset_includes_apex_for_double_wildcard_patterns() {
         let patterns = vec!["**.openai.com".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("openai.com"));
         assert!(set.is_match("api.openai.com"));
         assert!(!set.is_match("evilopenai.com"));
@@ -2148,13 +2257,13 @@ mod tests {
     #[test]
     fn compile_globset_rejects_global_wildcard() {
         let patterns = vec!["*".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
     fn compile_globset_allows_global_wildcard_when_enabled() {
         let patterns = vec!["*".to_string()];
-        let set = compile_allowlist_globset(&patterns).unwrap();
+        let set = compile_allowlist(&patterns).unwrap();
         assert!(set.is_match("example.com"));
         assert!(set.is_match("api.openai.com"));
         assert!(set.is_match("localhost"));
@@ -2163,19 +2272,19 @@ mod tests {
     #[test]
     fn compile_globset_rejects_bracketed_global_wildcard() {
         let patterns = vec!["[*]".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
     fn compile_globset_rejects_double_wildcard_bracketed_global_wildcard() {
         let patterns = vec!["**.[*]".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
     fn compile_globset_dedupes_patterns_without_changing_behavior() {
         let patterns = vec!["example.com".to_string(), "example.com".to_string()];
-        let set = compile_denylist_globset(&patterns).unwrap();
+        let set = compile_denylist(&patterns).unwrap();
         assert!(set.is_match("example.com"));
         assert!(set.is_match("EXAMPLE.COM"));
         assert!(!set.is_match("not-example.com"));
@@ -2184,7 +2293,7 @@ mod tests {
     #[test]
     fn compile_globset_rejects_invalid_patterns() {
         let patterns = vec!["[".to_string()];
-        assert!(compile_denylist_globset(&patterns).is_err());
+        assert!(compile_denylist(&patterns).is_err());
     }
 
     #[test]
@@ -2325,3 +2434,7 @@ mod tests {
         assert!(!state.is_unix_socket_allowed(&socket_path).await.unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "host_policy_tests.rs"]
+mod host_policy_tests;
